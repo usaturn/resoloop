@@ -10,7 +10,8 @@ public sealed partial class ApplyWorkflowTests
     // shorter than the runtime list can only converge by recreating the Component.
     private const string Identity = ""","identityFields":["Label"]""";
 
-    private ApplyDocument ShrinkDocument(string name, int materials, string rendererExtra = "", string extraComponents = "")
+    private ApplyDocument ShrinkDocument(string name, int materials, string rendererExtra = "", string extraComponents = "",
+        string leadingComponents = "")
     {
         var materialComponents = string.Join(",", Enumerable.Range(1, 4).Select(i =>
             $$"""{"key":"m{{i}}","type":"Test.Material","fields":{"Tint":{{i}} } }"""));
@@ -19,7 +20,7 @@ public sealed partial class ApplyWorkflowTests
             {"schemaVersion":"1","ownership":{"key":"{{name}}"},"slot":{"key":"root","name":"Plaza","parent":"Root"},
              "components":[{{materialComponents}}],
              "children":[{"slot":{"key":"rubble","name":"Rubble"},
-               "components":[{"key":"renderer","type":"Test.Renderer","fields":{"Materials":[{{list}}],"Label":"north"}{{rendererExtra}} }{{extraComponents}}]}]}
+               "components":[{{leadingComponents}}{"key":"renderer","type":"Test.Renderer","fields":{"Materials":[{{list}}],"Label":"north"}{{rendererExtra}} }{{extraComponents}}]}]}
             """);
     }
 
@@ -380,6 +381,44 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    // A new key created next to a recreate is saved at its index in the layout the recreate leaves, so the Component the recreate
+    // removes must not shift that index onto another key's Component: the key would be created again and the first one orphaned.
+    // The recreate may already be under way or, when the new key is declared first, not yet recorded in state.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResumedCreateOfANewKeyNextToARecreateBindsWhatItCreated(bool declaredBeforeRecreate)
+    {
+        const string extra = """{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}}""";
+        var name = "recreate-new-key-resume-" + declaredBeforeRecreate;
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name);
+        var three = declaredBeforeRecreate
+            ? ShrinkDocument(name, 3, leadingComponents: extra + ",")
+            : ShrinkDocument(name, 3, extraComponents: "," + extra);
+        client.AfterComponentAdded = component =>
+        {
+            if (component.Type == "Test.Renderer" && component.Members["Label"].Value!.GetValue<string>() == "east")
+                client.LoseNextComponentCreateResponse = true;
+        };
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
+        client.AfterComponentAdded = null;
+        var createdId = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" &&
+            component.Members["Label"].Value!.GetValue<string>() == "east").Id;
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal(declaredBeforeRecreate ? [createdId, renderer.Id] : [renderer.Id, createdId], RendererIds(Rubble(client)));
+        Assert.Equal(createdId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     // Leaving out the Component another key holds never resolves an ambiguity: without an ID or an index that still points
     // at a candidate, an unmanaged Component is not adopted.
     [Fact]
@@ -502,17 +541,22 @@ public sealed partial class ApplyWorkflowTests
 
     // The candidates after a reload include other keys' Components of the same type, so each carries its field values. Until
     // the replacement's ID is saved it may not exist, and clearing supersededId alone would bind the key to a sibling, so the
-    // hint removes the key instead. Following the hint converges and keeps the sibling.
+    // hint removes the key instead. Following the hint converges and keeps the siblings, however many there are after the
+    // recreated key: the layout the hint leaves is the one their saved indexes describe.
     [Theory]
-    [InlineData("before-add")]
-    [InlineData("lost-add-response")]
-    [InlineData("before-remove")]
-    public async Task InterruptedRecreateNextToASameTypeSiblingRecoversAfterWorldReloadByFollowingTheHint(string failure)
+    [InlineData("before-add", 1)]
+    [InlineData("lost-add-response", 1)]
+    [InlineData("before-remove", 1)]
+    [InlineData("before-add", 2)]
+    [InlineData("lost-add-response", 2)]
+    public async Task InterruptedRecreateNextToSameTypeSiblingsRecoversAfterWorldReloadByFollowingTheHint(string failure, int siblingCount)
     {
-        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"south"}}""";
-        var name = "shrink-reload-sibling-" + failure;
-        var (client, service, state, _) = await ApplyFourMaterialsAsync(name, extraComponents: sibling);
-        var three = ShrinkDocument(name, 3, extraComponents: sibling);
+        var siblingKeys = new[] { ("sibling", "south"), ("sibling2", "east") }.Take(siblingCount).ToArray();
+        var siblings = string.Concat(siblingKeys.Select(sibling =>
+            $$$""",{"key":"{{{sibling.Item1}}}","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"{{{sibling.Item2}}}"}}"""));
+        var name = $"shrink-reload-siblings-{failure}-{siblingCount}";
+        var (client, service, state, _) = await ApplyFourMaterialsAsync(name, extraComponents: siblings);
+        var three = ShrinkDocument(name, 3, extraComponents: siblings);
         if (failure == "lost-add-response") client.LoseNextComponentCreateResponse = true;
         else client.FailOnWrite = failure == "before-add" ? 1 : 2;
         Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
@@ -535,7 +579,8 @@ public sealed partial class ApplyWorkflowTests
 
         var north = Rubble(client).Components.Where(component => component.Type == "Test.Renderer" &&
             component.Members["Label"].Value!.GetValue<string>() == "north").ToArray();
-        var siblingId = Assert.Single(RendererIds(Rubble(client)), id => north.All(component => component.Id != id));
+        var siblingIds = RendererIds(Rubble(client)).Where(id => north.All(component => component.Id != id)).ToArray();
+        Assert.Equal(siblingCount, siblingIds.Length);
         var saved = JsonNode.Parse(File.ReadAllText(state))!;
         if (savedIdEmpty)
         {
@@ -552,10 +597,13 @@ public sealed partial class ApplyWorkflowTests
 
         var renderer = Renderer(client);
         Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
-        Assert.Equal([siblingId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal([.. siblingIds, renderer.Id], RendererIds(Rubble(client)));
         Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
-        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
-        Assert.Equal(4, MaterialTargets(Rubble(client).Components.Single(component => component.Id == siblingId)).Length);
+        for (var i = 0; i < siblingCount; i++)
+        {
+            Assert.Equal(siblingIds[i], StateComponent(state, siblingKeys[i].Item1)["id"]!.GetValue<string>());
+            Assert.Equal(4, MaterialTargets(Rubble(client).Components.Single(component => component.Id == siblingIds[i])).Length);
+        }
         client.ResetWriteCounts();
         await service.ApplyAsync(three, new ApplyOptions(state));
         Assert.Equal(0, client.Writes);
@@ -633,6 +681,80 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(oldId, saved["id"]!.GetValue<string>());
         Assert.Null(saved["supersededId"]);
         Assert.Equal(Rubble(client).Components.FindIndex(component => component.Id == oldId), saved["componentIndex"]!.GetValue<int>());
+    }
+
+    // Without its saved ID a resumed recreate matches its replacement by type and position, and that can be a Component this
+    // document does not manage, such as a copy the user made. Undoing the recreate never removes it.
+    [Theory]
+    [InlineData("before-add")]
+    [InlineData("replacement-removed")]
+    public async Task UndoneRecreateKeepsAReplacementMatchedWithoutItsSavedId(string failure)
+    {
+        var name = "shrink-undo-unsaved-" + failure;
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name);
+        var three = ShrinkDocument(name, 3);
+        client.FailOnWrite = failure == "before-add" ? 1 : 2;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        if (failure == "replacement-removed")
+            await client.RemoveComponentAsync(StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        var copy = await client.AddComponentAsync(Rubble(client).Id, "Test.Renderer", new Dictionary<string, string>
+        {
+            ["Materials"] = "[" + string.Join(",", MaterialIds(client, 4).Select(id => $"\"{id}\"")) + "]", ["Label"] = "west"
+        });
+        client.ResetWriteCounts();
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(copy.Id, JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(error.Context))!["keptComponentId"]!.GetValue<string>());
+        Assert.Equal([oldId, copy.Id], RendererIds(Rubble(client)));
+        AssertCopyUnchanged();
+        var saved = StateComponent(state, "renderer");
+        Assert.Equal(oldId, saved["id"]!.GetValue<string>());
+        Assert.Null(saved["supersededId"]);
+        Assert.Equal(0, saved["componentIndex"]!.GetValue<int>());
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([copy.Id, renderer.Id], RendererIds(Rubble(client)));
+        AssertCopyUnchanged();
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+
+        void AssertCopyUnchanged()
+        {
+            var component = Assert.Single(Rubble(client).Components, component => component.Id == copy.Id);
+            Assert.Equal("west", component.Members["Label"].Value!.GetValue<string>());
+            Assert.Equal(MaterialIds(client, 4), MaterialTargets(component));
+        }
+    }
+
+    // A replacement whose create response was lost is matched the same way, so a refilled one is kept too, and reported.
+    [Fact]
+    public async Task ResumedRecreateKeepsARefilledReplacementWhoseCreateResponseWasLost()
+    {
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-refill-lost");
+        var three = ShrinkDocument("shrink-refill-lost", 3);
+        RefillRenderers(client);
+        client.LoseNextComponentCreateResponse = true;
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
+        var replacementId = Assert.Single(RendererIds(Rubble(client)), id => id != oldId);
+        client.ResetWriteCounts();
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(replacementId, JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(error.Context))!["keptComponentId"]!.GetValue<string>());
+        Assert.Equal([oldId, replacementId], RendererIds(Rubble(client)));
+        var saved = StateComponent(state, "renderer");
+        Assert.Equal(oldId, saved["id"]!.GetValue<string>());
+        Assert.Null(saved["supersededId"]);
     }
 
     // Undoing a recreate keeps the replaced Component in place, so its siblings keep their actual positions in state.
