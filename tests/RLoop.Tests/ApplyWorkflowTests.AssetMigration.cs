@@ -98,6 +98,68 @@ public sealed partial class ApplyWorkflowTests
         Assert.Empty(replanned.Changes);
     }
 
+    [Fact]
+    public async Task AssetUrlIsNotAdoptedFromAReferenceThatPointedToAnotherAssetBeforeTheSave()
+    {
+        var (client, service, state) = await ApplyTwoAssetWorldAsync("saved-repointed", "other");
+        Assert.Equal("local://machine/asset-2", Assert.Single(HolderUrls(client)));
+        var holder = Assert.Single(Holders(client));
+        holder.Members["URL"] = holder.Members["URL"] with { Value = JsonValue.Create("resdb:///saved-other") };
+        client.ReloadWorld("session-saved");
+        client.ResetWriteCounts();
+        var repointed = ReloadDocument("saved-repointed-mesh", TwoAssetWorld("saved-repointed", "mesh"));
+
+        var plan = await service.PlanApplyAsync(repointed, new ApplyOptions(state));
+
+        Assert.Equal("source hash and imported URL match state",
+            Assert.Single(plan.Operations, operation => operation.Kind == "asset" && operation.Key == "mesh").Reason);
+        Assert.Equal("update", Assert.Single(plan.Operations, operation => operation.Kind == "component").Action);
+        await service.ApplyAsync(repointed, new ApplyOptions(state));
+        Assert.Equal("local://machine/asset-1", Assert.Single(HolderUrls(client)));
+        Assert.Equal("local://machine/asset-1", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+        Assert.Equal("local://machine/asset-2", StateAsset(state, "other")["url"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task AssetUrlIsAdoptedFromUnchangedReferencesWhenAnotherReferenceIsRepointed()
+    {
+        var (client, service, state) = await ApplyTwoAssetWorldAsync("saved-partly-repointed", "mesh", "other");
+        SaveAssetUrls(client, "resdb:///saved-mesh", "resdb:///saved-other");
+        var repointed = ReloadDocument("saved-partly-repointed-mesh", TwoAssetWorld("saved-partly-repointed", "mesh", "mesh"));
+
+        var plan = await service.PlanApplyAsync(repointed, new ApplyOptions(state));
+
+        Assert.Contains("migrated to resdb by a world save",
+            Assert.Single(plan.Operations, operation => operation.Kind == "asset" && operation.Key == "mesh").Reason);
+        Assert.Equal("no-op", Assert.Single(plan.Operations, operation => operation.Key == "holder-0").Action);
+        Assert.Equal("update", Assert.Single(plan.Operations, operation => operation.Key == "holder-1").Action);
+        await service.ApplyAsync(repointed, new ApplyOptions(state));
+        Assert.All(HolderUrls(client), url => Assert.Equal("resdb:///saved-mesh", url));
+        Assert.Equal("resdb:///saved-mesh", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+        Assert.Equal("local://machine/asset-2", StateAsset(state, "other")["url"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task StateWithoutRecordedAssetFieldsStillAdoptsTheMigratedUrl()
+    {
+        var (document, client, service, state) = await ApplySavedAssetWorldAsync("saved-legacy");
+        SaveAssetUrls(client, "resdb:///saved-crate", "resdb:///saved-crate");
+        // A state written before asset fields were recorded has no record on any Component.
+        var legacy = JsonNode.Parse(File.ReadAllText(state))!;
+        foreach (var (_, component) in legacy["components"]!.AsObject()) component!.AsObject().Remove("assetFields");
+        File.WriteAllText(state, legacy.ToJsonString());
+
+        var plan = await service.PlanApplyAsync(document, new ApplyOptions(state));
+
+        Assert.Contains("migrated to resdb by a world save", Assert.Single(plan.Operations, operation => operation.Kind == "asset").Reason);
+        Assert.Empty(plan.Changes);
+        await service.ApplyAsync(document, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal("resdb:///saved-crate", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""{"URL":"$asset:mesh"}"""),
+            JsonNode.Parse(File.ReadAllText(state))!["components"]!["mesh-a"]!["assetFields"]));
+    }
+
     [Theory]
     [InlineData("resdb:///saved-a", "resdb:///saved-b")]
     [InlineData("resdb:///saved-a", null)]
@@ -169,6 +231,31 @@ public sealed partial class ApplyWorkflowTests
         await service.ApplyAsync(document, new ApplyOptions(state));
         Assert.All(HolderUrls(client), url => Assert.Equal("local://machine/asset-1", url));
         return (document, client, service, state);
+    }
+
+    private async Task<(FakeResoniteClient Client, WorldService Service, string State)> ApplyTwoAssetWorldAsync(string name,
+        params string[] references)
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root, "crate.bin"), "first crate");
+        await File.WriteAllTextAsync(Path.Combine(_root, "other.bin"), "other crate");
+        var document = ReloadDocument(name, TwoAssetWorld(name, references));
+        var client = new FakeResoniteClient(document) { ImportUrlPrefix = "local://machine/asset-" };
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(document, new ApplyOptions(state));
+        return (client, service, state);
+    }
+
+    // mesh is imported first (local://machine/asset-1) and other second (local://machine/asset-2).
+    private static string TwoAssetWorld(string key, params string[] references)
+    {
+        var children = string.Join(",", references.Select((asset, index) =>
+            $$$"""{"slot":{"key":"crate-{{{index}}}","name":"Crate{{{index}}}"},"components":[{"key":"holder-{{{index}}}","type":"Test.AssetHolder","fields":{"URL":"$asset:{{{asset}}}"}}]}"""));
+        return $$$"""
+            {"schemaVersion":"1","ownership":{"key":"{{{key}}}"},"slot":{"key":"root","name":"SavedAssets","parent":"Root"},
+             "assets":{"mesh":{"kind":"mesh","source":"crate.bin"},"other":{"kind":"mesh","source":"other.bin"}},
+             "children":[{{{children}}}]}
+            """;
     }
 
     // Simulates Resonite moving the imported local asset into the saved world: live URLs change, state does not.
