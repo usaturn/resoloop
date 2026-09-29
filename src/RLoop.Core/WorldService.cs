@@ -1083,8 +1083,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 var superseded = prepared.SameSession && stateComponent?.SupersededId is { Length: > 0 } supersededId
                     ? FindSnapshotComponent(prepared, supersededId) : null;
                 var existing = relocating || newManagedComponent ? null :
-                    MatchComponent(WithoutHeldByOtherKeys(prepared, stableKey, stateComponent, Without(node.Existing?.Components ?? [], superseded)),
-                        spec.Type, ordinal, stateComponent, prepared.SameSession, topologyTargets);
+                    MatchComponent(Without(node.Existing?.Components ?? [], superseded), spec.Type, ordinal, stateComponent,
+                        prepared.SameSession, topologyTargets, HeldByOtherKeys(prepared, stableKey, stateComponent));
                 string? recreateReason = null;
                 if (existing is not null && superseded is null && ListShrinkReason(spec, existing) is { } shrink)
                     (superseded, existing, recreateReason) = (existing, null, shrink);
@@ -1099,7 +1099,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                     var sourceSlot = FindStateSlot(prepared, stateComponent!.SlotKey);
                     runtime.RelocationSource = sourceSlot is null ? null :
                         MatchComponent(Without(sourceSlot.Components, superseded), spec.Type, ordinal, stateComponent, prepared.SameSession,
-                            topologyTargets);
+                            topologyTargets, HeldByOtherKeys(prepared, stableKey, stateComponent));
                     if (runtime.RelocationSource?.Id == existing?.Id) runtime.RelocationSource = null;
                     // Without the replacement, the Component it replaced is the one to move.
                     if (runtime.RelocationSource is null) (runtime.RelocationSource, runtime.Superseded) = (superseded, null);
@@ -1176,16 +1176,18 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
 
     // A create interrupted before it ran saved no ID, so only type, member names and index are left to match by, and they can
     // pick a same-type Component another key holds. Every re-run would then stop on an ownership conflict. In the same session
-    // the other keys' saved IDs are exact, so leave their Components to them.
-    private static IReadOnlyList<ComponentSummary> WithoutHeldByOtherKeys(PreparedApply prepared, string key, ApplyStateComponent? state,
-        IReadOnlyList<ComponentSummary> components)
+    // the other keys' saved IDs are exact, so a Component they hold is never this key's match. It stays in the list, though:
+    // the saved index counts it, and leaving it out would shift the index onto another Component.
+    private static IReadOnlySet<string>? HeldByOtherKeys(PreparedApply prepared, string key, ApplyStateComponent? state)
     {
-        if (!prepared.SameSession || state?.Id is not { Length: 0 }) return components;
-        var held = prepared.State.Components.Where(pair => pair.Key != key)
-            .SelectMany(pair => new[] { pair.Value.Id, pair.Value.SupersededId }).ToHashSet(StringComparer.Ordinal);
-        return components.Where(component => !held.Contains(component.Id)).ToArray();
+        if (!prepared.SameSession || state?.Id is not { Length: 0 }) return null;
+        return prepared.State.Components.Where(pair => pair.Key != key)
+            .SelectMany(pair => new[] { pair.Value.Id, pair.Value.SupersededId }).OfType<string>().ToHashSet(StringComparer.Ordinal);
     }
 
+    // The candidates are every Component of the type on the Slot, other keys' included, so each carries the values of this key's
+    // managed fields. Until the replacement's ID is saved the replacement may not exist, and clearing supersededId alone would
+    // leave the key to bind a sibling by type and index, so the recovery removes the key and lets apply create it again.
     private static RLoopException InterruptedRecreateAcrossSession(PreparedApply prepared, string key, ApplyStateComponent state,
         SlotInfo? slot, string slotPath) =>
         new("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION",
@@ -1195,12 +1197,21 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 ["stateFile"] = prepared.StatePath, ["componentKey"] = key, ["slotPath"] = slotPath,
                 ["savedId"] = state.Id, ["savedSupersededId"] = state.SupersededId,
                 ["candidates"] = (slot?.Components ?? []).Where(candidate => TypeNamesEquivalent(candidate.Type, state.Type))
-                    .Select(candidate => new { id = candidate.Id, lists = (candidate.Members ?? new Dictionary<string, MemberValue>())
-                        .Where(member => member.Value.Kind == "list").ToDictionary(member => member.Key, member => member.Value.Elements?.Count ?? 0) })
+                    .Select(candidate => new
+                    {
+                        id = candidate.Id,
+                        fields = (state.MemberNames ?? []).Select(name => (name, member: candidate.Members?.GetValueOrDefault(name)))
+                            .Where(field => field.member is { Kind: not "list" })
+                            .ToDictionary(field => field.name, field => field.member!.Kind == "reference" ? (object?)field.member.TargetId : field.member.Value),
+                        lists = (candidate.Members ?? new Dictionary<string, MemberValue>()).Where(member => member.Value.Kind == "list")
+                            .ToDictionary(member => member.Key, member => member.Value.Elements?.Count ?? 0)
+                    })
                     .ToArray()
             },
-            ["Inspect candidates: the replaced Component still has the longer list. Remove only that Component, then remove supersededId from this key in the state file and re-run apply.",
-             "Do not delete the state file or pick a candidate by position; the other candidate is the managed replacement."]);
+            [string.IsNullOrEmpty(state.Id)
+                ? "The replacement was being created when apply stopped, so it may not exist, and if it does its ID was not saved. Candidates include other keys' Components of this type. Remove every candidate whose fields match this key's declared values (the replaced Component, whose lists are longer than declared, and the replacement if it was created), then remove this key from the state file and re-run apply; apply creates the Component again."
+                : "Candidates include other keys' Components of this type. Of the candidates whose fields match this key's declared values, the replaced Component is the one whose lists are longer than declared. Remove only that Component, then remove supersededId from this key in the state file and re-run apply.",
+             "Do not delete the state file or pick a candidate by position. If the fields do not tell this key's Components from the others, inspect them in Resonite before removing any."]);
 
     // Records each managed Component's index in the Slot layout left once the removed Components are gone and new ones appended.
     private static void AssignComponentIndexes(NodeRuntime node, IEnumerable<ComponentRuntime> group, IReadOnlySet<string> removed,
@@ -1836,7 +1847,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         prepared.State.Slots.TryGetValue(slotKey, out var stateSlot) ? FindManagedSlot(prepared, stateSlot) : null;
 
     private static ComponentSummary? MatchComponent(IReadOnlyList<ComponentSummary> components, string type, int ordinal,
-        ApplyStateComponent? state, bool sameSession, IReadOnlyDictionary<string, string>? referenceTargets = null)
+        ApplyStateComponent? state, bool sameSession, IReadOnlyDictionary<string, string>? referenceTargets = null,
+        IReadOnlySet<string>? held = null)
     {
         if (state is not null && sameSession)
         {
@@ -1852,11 +1864,13 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                     ["type"] = state.Type },
                 ["Inspect candidateIds and preserve the existing state. Adding identityFields to a manifest does not populate an older checkpoint's identity values.",
                  "Prefer named provider Slots for new content. For existing content, verify ownership and each candidate before an explicit recovery; never guess by ordinal or automatically adopt."]);
-        if (matches.Length == 1) return matches[0];
+        // A match that another key holds means this key's Component does not exist yet. Held Components never settle an ambiguity.
+        if (matches.Length == 1) return held?.Contains(matches[0].Id) == true ? null : matches[0];
         if (state is not null && (state.MemberNames is not null || state.IdentityValues is not null)) return null;
         matches = components.Where(x => TypeNamesEquivalent(x.Type, state?.Type ?? type)).ToArray();
         var requestedOrdinal = state?.TypeOrdinal ?? ordinal;
-        return requestedOrdinal >= 0 && requestedOrdinal < matches.Length ? matches[requestedOrdinal] : null;
+        var byOrdinal = requestedOrdinal >= 0 && requestedOrdinal < matches.Length ? matches[requestedOrdinal] : null;
+        return byOrdinal is not null && held?.Contains(byOrdinal.Id) == true ? null : byOrdinal;
     }
 
     private static IReadOnlyDictionary<string, string>? ResolveStateTopologyTargets(PreparedApply prepared,
