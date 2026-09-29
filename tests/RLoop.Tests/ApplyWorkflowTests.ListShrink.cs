@@ -23,8 +23,46 @@ public sealed partial class ApplyWorkflowTests
             """);
     }
 
+    // The renderer of ShrinkDocument, with three materials, moved to a child Slot of Rubble or no longer declared.
+    private ApplyDocument RendererElsewhereDocument(string name, bool moved)
+    {
+        var materialComponents = string.Join(",", Enumerable.Range(1, 4).Select(i =>
+            $$"""{"key":"m{{i}}","type":"Test.Material","fields":{"Tint":{{i}} } }"""));
+        var debris = moved
+            ? ""","children":[{"slot":{"key":"debris","name":"Debris"},"components":[{"key":"renderer","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3"],"Label":"north"}}]}]"""
+            : "";
+        return ReloadDocument(name, $$"""
+            {"schemaVersion":"1","ownership":{"key":"{{name}}"},"slot":{"key":"root","name":"Plaza","parent":"Root"},
+             "components":[{{materialComponents}}],
+             "children":[{"slot":{"key":"rubble","name":"Rubble"},"components":[]{{debris}} }]}
+            """);
+    }
+
     private static FakeResoniteClient.FakeSlot Rubble(FakeResoniteClient client) =>
         client.Root.Children.Single(slot => slot.Name == "Plaza").Children.Single();
+
+    private static string[] RendererIds(FakeResoniteClient.FakeSlot slot) =>
+        slot.Components.Where(component => component.Type == "Test.Renderer").Select(component => component.Id).ToArray();
+
+    // Simulates runtime logic that sizes a new renderer's list itself, one element longer than any declaration.
+    private static void RefillRenderers(FakeResoniteClient client) => client.AfterComponentAdded = component =>
+    {
+        if (component.Type != "Test.Renderer") return;
+        var materials = component.Members["Materials"];
+        component.Members["Materials"] = materials with
+        {
+            Elements = [.. materials.Elements!, new MemberValue("reference", component.Id + ":Materials[3]", TargetId: "null")]
+        };
+    };
+
+    // Stops the recreate after the replacement exists and before the replaced Component is removed.
+    private static async Task InterruptBeforeRemovingReplacedAsync(FakeResoniteClient client, WorldService service, ApplyDocument document, string state)
+    {
+        client.FailOnWrite = 2;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(document, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        client.ResetWriteCounts();
+    }
 
     private static FakeResoniteClient.FakeComponent Renderer(FakeResoniteClient client) =>
         Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" &&
@@ -315,15 +353,7 @@ public sealed partial class ApplyWorkflowTests
     {
         var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-refill");
         var three = ShrinkDocument("shrink-refill", 3);
-        client.AfterComponentAdded = component =>
-        {
-            if (component.Type != "Test.Renderer") return;
-            var materials = component.Members["Materials"];
-            component.Members["Materials"] = materials with
-            {
-                Elements = [.. materials.Elements!, new MemberValue("reference", component.Id + ":Materials[3]", TargetId: "null")]
-            };
-        };
+        RefillRenderers(client);
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -334,5 +364,161 @@ public sealed partial class ApplyWorkflowTests
             Assert.Equal(oldId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
             Assert.Null(StateComponent(state, "renderer")["supersededId"]);
         }
+    }
+
+    // A resumed recreate binds the replacement an interrupted apply created, so it must be verified like a new one.
+    [Fact]
+    public async Task ResumedRecreateThatTheRuntimeRefilledStopsAndKeepsTheOriginal()
+    {
+        const string extra = """,{"key":"extra","type":"Test.Target","fields":{"Enabled":true}}""";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-refill-resume");
+        var three = ShrinkDocument("shrink-refill-resume", 3, extraComponents: extra);
+        RefillRenderers(client);
+        // The second write creates the extra Component, after the replacement and before its verification.
+        client.FailOnWrite = 2;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        var replacementId = StateComponent(state, "renderer")["id"]!.GetValue<string>();
+        Assert.Equal([oldId, replacementId], RendererIds(Rubble(client)));
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        Assert.Equal([oldId], RendererIds(Rubble(client)));
+        var saved = StateComponent(state, "renderer");
+        Assert.Equal(oldId, saved["id"]!.GetValue<string>());
+        Assert.Null(saved["supersededId"]);
+        Assert.Equal(Rubble(client).Components.FindIndex(component => component.Id == oldId), saved["componentIndex"]!.GetValue<int>());
+    }
+
+    // Undoing a recreate keeps the replaced Component in place, so its siblings keep their actual positions in state.
+    [Fact]
+    public async Task UndoneRecreateKeepsSiblingIndexesSoAWorldReloadStillBindsThem()
+    {
+        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"south"}}""";
+        var (client, service, state, _) = await ApplyFourMaterialsAsync("shrink-refill-sibling", extraComponents: sibling);
+        RefillRenderers(client);
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() =>
+            service.ApplyAsync(ShrinkDocument("shrink-refill-sibling", 3, extraComponents: sibling), new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        var components = Rubble(client).Components;
+        foreach (var key in new[] { "renderer", "sibling" })
+        {
+            var saved = StateComponent(state, key);
+            Assert.Equal(components.FindIndex(component => component.Id == saved["id"]!.GetValue<string>()),
+                saved["componentIndex"]!.GetValue<int>());
+        }
+        client.AfterComponentAdded = null;
+        client.ReloadWorld("session-reloaded");
+        client.ResetWriteCounts();
+        var four = ShrinkDocument("shrink-refill-sibling", 4, extraComponents: sibling);
+        var plan = await service.PlanApplyAsync(four, new ApplyOptions(state));
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        Assert.Empty(plan.Changes);
+        Assert.Equal(0, client.Writes);
+    }
+
+    // A Component created in the same apply must not keep the ID of a replacement that the undo removes.
+    [Fact]
+    public async Task UndoneRecreateLeavesNoReferenceToTheRemovedReplacement()
+    {
+        const string source = """,{"key":"source","type":"Test.Source","fields":{"Target":"$ref:renderer"}}""";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-refill-source");
+        RefillRenderers(client);
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() =>
+            service.ApplyAsync(ShrinkDocument("shrink-refill-source", 3, extraComponents: source), new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        var created = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Source");
+        Assert.NotEqual(error.Context["removedReplacementId"], created.Members["Target"].TargetId);
+        client.AfterComponentAdded = null;
+        await service.ApplyAsync(ShrinkDocument("shrink-refill-source", 4, extraComponents: source), new ApplyOptions(state));
+        Assert.Equal(oldId, created.Members["Target"].TargetId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PruningAKeyWhoseRecreateWasInterruptedAlsoRemovesTheReplacedComponent(bool interruptBetweenRemovals)
+    {
+        var name = "shrink-prune-" + interruptBetweenRemovals;
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name);
+        await InterruptBeforeRemovingReplacedAsync(client, service, ShrinkDocument(name, 3), state);
+        var replacementId = StateComponent(state, "renderer")["id"]!.GetValue<string>();
+        var removed = RendererElsewhereDocument(name, moved: false);
+        var prune = new ApplyOptions(state, Prune: true, ConfirmDeletes: true);
+
+        var plan = await service.PlanApplyAsync(removed, prune);
+        Assert.Equal(2, plan.Operations.Count(operation => operation.Action == "delete" && operation.Key == "renderer"));
+        if (interruptBetweenRemovals)
+        {
+            // The replaced Component goes first, and its key keeps tracking the replacement until that is removed too.
+            client.FailOnWrite = 2;
+            await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(removed, prune));
+            client.FailOnWrite = null;
+            Assert.Equal([replacementId], RendererIds(Rubble(client)));
+            Assert.Equal(replacementId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+            Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        }
+        await service.ApplyAsync(removed, prune);
+
+        Assert.DoesNotContain(oldId, RendererIds(Rubble(client)));
+        Assert.Empty(RendererIds(Rubble(client)));
+        Assert.Null(JsonNode.Parse(File.ReadAllText(state))!["components"]!["renderer"]);
+    }
+
+    [Fact]
+    public async Task MovingAComponentWhoseRecreateWasInterruptedAlsoRemovesTheReplacedComponent()
+    {
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-move");
+        await InterruptBeforeRemovingReplacedAsync(client, service, ShrinkDocument("shrink-move", 3), state);
+        var moved = RendererElsewhereDocument("shrink-move", moved: true);
+
+        var plan = await service.PlanApplyAsync(moved, new ApplyOptions(state));
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+
+        var entry = Assert.Single(plan.Changes, change => change.Key == "renderer");
+        Assert.Equal("relocate", entry.Action);
+        Assert.Contains(oldId, entry.Reason);
+        Assert.Empty(RendererIds(Rubble(client)));
+        var debris = Rubble(client).Children.Single();
+        var renderer = Assert.Single(debris.Components, component => component.Type == "Test.Renderer");
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // A reload renumbers both halves, so moving or removing the key cannot tell which one to keep either.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InterruptedRecreateStopsBeforeMutationAfterWorldReloadWhenTheKeyMovesOrIsRemoved(bool moved)
+    {
+        var name = "shrink-reload-elsewhere-" + moved;
+        var (client, service, state, _) = await ApplyFourMaterialsAsync(name);
+        await InterruptBeforeRemovingReplacedAsync(client, service, ShrinkDocument(name, 3), state);
+        client.ReloadWorld("session-reloaded");
+        var renderers = RendererIds(Rubble(client));
+        Assert.Equal(2, renderers.Length);
+        var document = RendererElsewhereDocument(name, moved);
+        var options = new ApplyOptions(state, Prune: !moved, ConfirmDeletes: !moved);
+        var stateHash = SHA256.HashData(File.ReadAllBytes(state));
+
+        var planError = await Assert.ThrowsAsync<RLoopException>(() => service.PlanApplyAsync(document, options));
+        var applyError = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(document, options));
+
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", planError.Code);
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", applyError.Code);
+        var context = System.Text.Json.JsonSerializer.Serialize(applyError.Context);
+        Assert.All(renderers, id => Assert.Contains(id, context));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(renderers, RendererIds(Rubble(client)));
+        Assert.Equal(stateHash, SHA256.HashData(File.ReadAllBytes(state)));
     }
 }

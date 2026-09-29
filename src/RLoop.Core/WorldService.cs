@@ -444,7 +444,9 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 options.Progress?.Invoke(new ApplyProgress("slots", completed, total, node.Path, $"{node.SlotAction} Slot"));
             }
 
-            var byKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null)
+            // A replacement is not referable until it is verified, so a Component created before then cannot keep its ID
+            // after an undo. Such a Component is created without the reference and gets it with the fields below.
+            var byKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null && !x.VerifiesRecreate)
                 .ToDictionary(x => x.Spec.Key!, x => x, StringComparer.Ordinal);
             var slotsByKey = prepared.Nodes.ToDictionary(x => x.StableKey, StringComparer.Ordinal);
             foreach (var component in prepared.Components)
@@ -471,7 +473,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                     component.ResolvedType = created.Type;
                     counts.ComponentsAdded++;
                 }
-                if (!string.IsNullOrWhiteSpace(component.Spec.Key)) byKey[component.Spec.Key!] = component;
+                if (!string.IsNullOrWhiteSpace(component.Spec.Key) && !component.VerifiesRecreate) byKey[component.Spec.Key!] = component;
                 prepared.State.Components[component.StableKey] = CreateComponentState(component, component.Id!);
                 Checkpoint(prepared);
                 completed++;
@@ -480,11 +482,15 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             }
 
             // Runtime logic can refill a new Component's list (for example from its asset), and then every apply would recreate it
-            // again. Verify each replacement before any reference is re-pointed at it, and undo the recreate if the list is still longer.
-            foreach (var component in prepared.Components.Where(component => component.Existing is null && component.Superseded is not null))
+            // again. Verify each replacement, including one an interrupted apply created, before any reference is re-pointed at it,
+            // and undo the recreate if the list is still longer.
+            var recreates = prepared.Components.Where(component => component.VerifiesRecreate).ToArray();
+            foreach (var component in recreates.Where(component => !string.IsNullOrWhiteSpace(component.Spec.Key)))
+                byKey[component.Spec.Key!] = component;
+            foreach (var component in recreates)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (component.AppliedOnCreate is null)
+                if (component.Existing is null && component.AppliedOnCreate is null)
                 {
                     var createFields = await ResolveFieldsAsync(MergeCreateFields(component.Spec), byKey, slotsByKey, assetUrls, cancellationToken);
                     await client.SetComponentMembersAsync(component.Id!, component.ResolvedType ?? component.Spec.Type, createFields, cancellationToken);
@@ -493,14 +499,13 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 var replacement = await client.GetComponentAsync(component.Id!, cancellationToken);
                 if (ListShrinkReason(component.Spec, new ComponentSummary(replacement.Id, replacement.Type, replacement.Members)) is not { } refilled) continue;
                 await client.RemoveComponentAsync(component.Id!, cancellationToken);
-                prepared.State.Components[component.StableKey] = (component.PreviousState ?? CreateComponentState(component, string.Empty))
-                    with { Id = component.Superseded!.Id, SupersededId = null };
+                UndoRecreateState(prepared, component);
                 Checkpoint(prepared);
                 throw new RLoopException("APPLY_LIST_SHRINK_NOT_CONVERGED",
                     $"Recreating Component '{component.StableKey}' did not shorten its list: the runtime refilled the new Component. The replacement was removed and the original Component kept.",
                     ExitCodes.OperationFailed, new Dictionary<string, object?>
                     {
-                        ["componentKey"] = component.StableKey, ["componentId"] = component.Superseded.Id,
+                        ["componentKey"] = component.StableKey, ["componentId"] = component.Superseded!.Id,
                         ["removedReplacementId"] = replacement.Id, ["plannedReason"] = component.RecreateReason, ["observed"] = refilled
                     },
                     ["The runtime sizes this list itself (for example from the mesh's submesh count). Declare as many elements as the runtime keeps, or change the source asset first."]);
@@ -570,7 +575,10 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     await client.RemoveComponentAsync(deletion.Id, cancellationToken);
-                    prepared.State.Components.Remove(deletion.Key);
+                    // The Component an interrupted recreate replaced goes first; the key keeps tracking the replacement.
+                    if (prepared.State.Components.TryGetValue(deletion.Key, out var pruned) && pruned.SupersededId == deletion.Id)
+                        prepared.State.Components[deletion.Key] = pruned with { SupersededId = null };
+                    else prepared.State.Components.Remove(deletion.Key);
                     counts.ComponentsDeleted++;
                     Checkpoint(prepared);
                     options.Progress?.Invoke(new ApplyProgress("prune", counts.ComponentsDeleted + counts.SlotsDeleted,
@@ -1063,27 +1071,19 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 // An interrupted recreate leaves the replaced Component on the Slot and its ID in state. Keep it out of
                 // matching so the replacement (or a fresh create) binds without ambiguity, and remove it after the fields.
                 // A world reload renumbers both halves of an interrupted recreate, so the saved ID cannot tell them apart and
-                // an index tie-break could bind the replaced one and recreate again. Stop before any mutation.
-                if (!prepared.SameSession && !relocating && stateComponent?.SupersededId is { Length: > 0 } staleSuperseded)
-                    throw new RLoopException("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION",
-                        $"Component '{stableKey}' was being recreated when an earlier apply stopped, and the world was reloaded since. The replaced and the replacement Component can no longer be told apart by ID. No mutations were performed.",
-                        ExitCodes.ValidationFailed, new Dictionary<string, object?>
-                        {
-                            ["stateFile"] = prepared.StatePath, ["componentKey"] = stableKey, ["slotPath"] = node.Path,
-                            ["savedId"] = stateComponent.Id, ["savedSupersededId"] = staleSuperseded,
-                            ["candidates"] = (node.Existing?.Components ?? []).Where(candidate => TypeNamesEquivalent(candidate.Type, stateComponent.Type))
-                                .Select(candidate => new { id = candidate.Id, lists = (candidate.Members ?? new Dictionary<string, MemberValue>())
-                                    .Where(member => member.Value.Kind == "list").ToDictionary(member => member.Key, member => member.Value.Elements?.Count ?? 0) })
-                                .ToArray()
-                        },
-                        ["Inspect candidates: the replaced Component still has the longer list. Remove only that Component, then remove supersededId from this key in the state file and re-run apply.",
-                         "Do not delete the state file or pick a candidate by position; the other candidate is the managed replacement."]);
-                var superseded = prepared.SameSession && !relocating && stateComponent?.SupersededId is { Length: > 0 } supersededId
-                    ? node.Existing?.Components.FirstOrDefault(candidate => candidate.Id == supersededId) : null;
-                IReadOnlyList<ComponentSummary> slotComponents = superseded is null ? node.Existing?.Components ?? [] :
-                    node.Existing!.Components.Where(candidate => candidate.Id != superseded.Id).ToArray();
+                // an index tie-break could bind the replaced one and recreate again, or move one half and orphan the other.
+                // Stop before any mutation.
+                if (!prepared.SameSession && stateComponent?.SupersededId is { Length: > 0 })
+                {
+                    var stateSlot = relocating ? FindStateSlot(prepared, stateComponent.SlotKey) : node.Existing;
+                    throw InterruptedRecreateAcrossSession(prepared, stableKey, stateComponent, stateSlot,
+                        relocating ? stateSlot?.Path ?? stateComponent.SlotKey : node.Path);
+                }
+                // In the same session the saved ID still finds the replaced Component, wherever an interrupted move left it.
+                var superseded = prepared.SameSession && stateComponent?.SupersededId is { Length: > 0 } supersededId
+                    ? FindSnapshotComponent(prepared, supersededId) : null;
                 var existing = relocating || newManagedComponent ? null :
-                    MatchComponent(slotComponents, spec.Type, ordinal, stateComponent, prepared.SameSession,
+                    MatchComponent(Without(node.Existing?.Components ?? [], superseded), spec.Type, ordinal, stateComponent, prepared.SameSession,
                         topologyTargets);
                 string? recreateReason = null;
                 if (existing is not null && superseded is null && ListShrinkReason(spec, existing) is { } shrink)
@@ -1098,9 +1098,11 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 {
                     var sourceSlot = FindStateSlot(prepared, stateComponent!.SlotKey);
                     runtime.RelocationSource = sourceSlot is null ? null :
-                        MatchComponent(sourceSlot.Components, spec.Type, ordinal, stateComponent, prepared.SameSession,
+                        MatchComponent(Without(sourceSlot.Components, superseded), spec.Type, ordinal, stateComponent, prepared.SameSession,
                             topologyTargets);
                     if (runtime.RelocationSource?.Id == existing?.Id) runtime.RelocationSource = null;
+                    // Without the replacement, the Component it replaced is the one to move.
+                    if (runtime.RelocationSource is null) (runtime.RelocationSource, runtime.Superseded) = (superseded, null);
                 }
                 prepared.Components.Add(runtime);
             }
@@ -1108,13 +1110,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
 
         // A recreate removes the replaced Component and appends its replacement, so record the final Slot layout.
         foreach (var group in prepared.Components.GroupBy(component => component.Node).Where(group => group.Any(component => component.Superseded is not null)))
-        {
-            var removed = group.Where(component => component.Superseded is not null).Select(component => component.Superseded!.Id).ToHashSet(StringComparer.Ordinal);
-            var kept = (group.Key.Existing?.Components ?? []).Select(component => component.Id).Where(id => !removed.Contains(id)).ToList();
-            var appended = 0;
-            foreach (var component in group)
-                component.ComponentIndex = component.Existing is not null ? kept.IndexOf(component.Existing.Id) : kept.Count + appended++;
-        }
+            AssignComponentIndexes(group.Key, group, group.Where(component => component.Superseded is not null)
+                .Select(component => component.Superseded!.Id).ToHashSet(StringComparer.Ordinal), component => component.Existing?.Id);
 
         DetectSavedAssetMigrations(prepared);
         var existingByKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null)
@@ -1126,7 +1123,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             var action = component.RelocationSource is not null ? "relocate" : component.Superseded is not null ? "recreate" :
                 component.Existing is null ? "create" : "no-op";
             var reason = component.RelocationSource is not null
-                ? $"stable key '{component.StableKey}' moves the Component to Slot '{component.Node.StableKey}'"
+                ? $"stable key '{component.StableKey}' moves the Component to Slot '{component.Node.StableKey}'" + (component.Superseded is null ? "" :
+                    $" and removes the Component '{component.Superseded.Id}' replaced by an interrupted recreate")
                 : component.Superseded is not null ? component.RecreateReason ??
                     $"finishes an interrupted recreate by removing the replaced Component '{component.Superseded.Id}'"
                 : component.Existing is null ? "managed Component does not exist" : "Component and fields already match";
@@ -1168,6 +1166,53 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             .ToArray();
         return shrinks.Length == 0 ? null
             : string.Join("; ", shrinks) + "; the runtime cannot remove list elements, so the component is recreated";
+    }
+
+    private static ComponentSummary? FindSnapshotComponent(PreparedApply prepared, string id) =>
+        prepared.SnapshotSlots.SelectMany(slot => slot.Components).FirstOrDefault(component => component.Id == id);
+
+    private static IReadOnlyList<ComponentSummary> Without(IReadOnlyList<ComponentSummary> components, ComponentSummary? excluded) =>
+        excluded is null ? components : components.Where(component => component.Id != excluded.Id).ToArray();
+
+    private static RLoopException InterruptedRecreateAcrossSession(PreparedApply prepared, string key, ApplyStateComponent state,
+        SlotInfo? slot, string slotPath) =>
+        new("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION",
+            $"Component '{key}' was being recreated when an earlier apply stopped, and the world was reloaded since. The replaced and the replacement Component can no longer be told apart by ID. No mutations were performed.",
+            ExitCodes.ValidationFailed, new Dictionary<string, object?>
+            {
+                ["stateFile"] = prepared.StatePath, ["componentKey"] = key, ["slotPath"] = slotPath,
+                ["savedId"] = state.Id, ["savedSupersededId"] = state.SupersededId,
+                ["candidates"] = (slot?.Components ?? []).Where(candidate => TypeNamesEquivalent(candidate.Type, state.Type))
+                    .Select(candidate => new { id = candidate.Id, lists = (candidate.Members ?? new Dictionary<string, MemberValue>())
+                        .Where(member => member.Value.Kind == "list").ToDictionary(member => member.Key, member => member.Value.Elements?.Count ?? 0) })
+                    .ToArray()
+            },
+            ["Inspect candidates: the replaced Component still has the longer list. Remove only that Component, then remove supersededId from this key in the state file and re-run apply.",
+             "Do not delete the state file or pick a candidate by position; the other candidate is the managed replacement."]);
+
+    // Records each managed Component's index in the Slot layout left once the removed Components are gone and new ones appended.
+    private static void AssignComponentIndexes(NodeRuntime node, IEnumerable<ComponentRuntime> group, IReadOnlySet<string> removed,
+        Func<ComponentRuntime, string?> keptId)
+    {
+        var kept = (node.Existing?.Components ?? []).Select(component => component.Id).Where(id => !removed.Contains(id)).ToList();
+        var appended = 0;
+        foreach (var component in group)
+            component.ComponentIndex = keptId(component) is { } id ? kept.IndexOf(id) : kept.Count + appended++;
+    }
+
+    // Undoing a recreate keeps the replaced Component where it is and drops the replacement, so every managed Component on
+    // the Slot is saved at its actual index. Otherwise a later world reload would bind siblings by stale indexes.
+    private static void UndoRecreateState(PreparedApply prepared, ComponentRuntime undone)
+    {
+        var group = prepared.Components.Where(component => component.Node == undone.Node).ToArray();
+        var removed = group.Where(component => component != undone && component.Superseded is not null).Select(component => component.Superseded!.Id)
+            .Concat(undone.Existing is null ? [] : [undone.Existing.Id]).ToHashSet(StringComparer.Ordinal);
+        AssignComponentIndexes(undone.Node, group, removed, component => component == undone ? undone.Superseded!.Id : component.Existing?.Id);
+        foreach (var component in group.Where(component => component != undone))
+            if (prepared.State.Components.TryGetValue(component.StableKey, out var saved))
+                prepared.State.Components[component.StableKey] = saved with { ComponentIndex = component.ComponentIndex };
+        prepared.State.Components[undone.StableKey] = (undone.PreviousState ?? CreateComponentState(undone, string.Empty))
+            with { Id = undone.Superseded!.Id, SupersededId = null, ComponentIndex = undone.ComponentIndex };
     }
 
     // Recreating gives the Component and its members new IDs. Only declared reference fields of managed Components are
@@ -1369,6 +1414,20 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             if (!prepared.State.Slots.TryGetValue(stateComponent.Value.SlotKey, out var stateSlot)) continue;
             var slot = ResolveOwned(stateSlot);
             if (slot is null || !IsWithin(slot.Id, rootId)) continue;
+            if (stateComponent.Value.SupersededId is { Length: > 0 } supersededId)
+            {
+                if (!prepared.SameSession)
+                    throw InterruptedRecreateAcrossSession(prepared, stateComponent.Key, stateComponent.Value, slot, slot.Path ?? stateSlot.Path);
+                // Remove the Component an interrupted recreate replaced before the replacement, which the key tracks until then.
+                if (FindSnapshotComponent(prepared, supersededId) is { } replaced)
+                {
+                    var replacedDeletion = new DeletionRuntime("component", stateComponent.Key, replaced.Id,
+                        slot.Path + "/@" + stateComponent.Key, "stable key is no longer declared; removes the Component replaced by an interrupted recreate");
+                    prepared.Deletions.Add(replacedDeletion);
+                    prepared.Entries.Add(new ApplyPlanEntry("delete", replacedDeletion.Kind, replacedDeletion.Path, replacedDeletion.Key,
+                        replaced.Type, Reason: replacedDeletion.Reason));
+                }
+            }
             var component = prepared.SameSession ? slot.Components.FirstOrDefault(x => x.Id == stateComponent.Value.Id) : null;
             if (!prepared.SameSession)
             {
@@ -2185,6 +2244,10 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         public string? RecreateReason { get; set; }
         public ApplyStateComponent? PreviousState { get; set; }
         public Dictionary<string, string> MemberIds { get; } = new(StringComparer.Ordinal);
+        // A list-shrink recreate on this Slot, new or resumed, whose replacement must be verified. A move only removes
+        // the Component that an interrupted recreate replaced.
+        public bool VerifiesRecreate => Superseded is not null && RelocationSource is null &&
+            Node.Existing?.Components.Any(component => component.Id == Superseded.Id) == true;
     }
 
     private sealed class ApplyCounts
