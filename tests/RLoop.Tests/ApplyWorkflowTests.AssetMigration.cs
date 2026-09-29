@@ -144,10 +144,7 @@ public sealed partial class ApplyWorkflowTests
     {
         var (document, client, service, state) = await ApplySavedAssetWorldAsync("saved-legacy");
         SaveAssetUrls(client, "resdb:///saved-crate", "resdb:///saved-crate");
-        // A state written before asset fields were recorded has no record on any Component.
-        var legacy = JsonNode.Parse(File.ReadAllText(state))!;
-        foreach (var (_, component) in legacy["components"]!.AsObject()) component!.AsObject().Remove("assetFields");
-        File.WriteAllText(state, legacy.ToJsonString());
+        RemoveRecordedAssetFields(state);
 
         var plan = await service.PlanApplyAsync(document, new ApplyOptions(state));
 
@@ -158,6 +155,39 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal("resdb:///saved-crate", StateAsset(state, "mesh")["url"]!.GetValue<string>());
         Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""{"URL":"$asset:mesh"}"""),
             JsonNode.Parse(File.ReadAllText(state))!["components"]!["mesh-a"]!["assetFields"]));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InterruptedReimportDoesNotAdoptTheSavedUrlOfThePreviousContent(bool legacyState)
+    {
+        var (client, service, state) = await ApplyTwoAssetWorldAsync("saved-interrupted-" + legacyState, "mesh", "other");
+        if (legacyState) RemoveRecordedAssetFields(state);
+        var document = ReloadDocument("saved-interrupted-" + legacyState, TwoAssetWorld("saved-interrupted-" + legacyState, "mesh", "other"));
+        await File.WriteAllTextAsync(Path.Combine(_root, "crate.bin"), "second crate");
+        // Stop after mesh is re-imported and checkpointed, before any field points at the new content.
+        using var cancellation = new CancellationTokenSource();
+        var stopped = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(document,
+            new ApplyOptions(state, Progress: progress => { if (progress.Stage == "assets") cancellation.Cancel(); }), cancellation.Token));
+        Assert.Equal("APPLY_CANCELLED", stopped.Code);
+        Assert.Equal("local://machine/asset-3", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+        SaveAssetUrls(client, "resdb:///saved-old-mesh", "resdb:///saved-other");
+
+        var plan = await service.PlanApplyAsync(document, new ApplyOptions(state));
+
+        Assert.Equal("source hash and imported URL match state",
+            Assert.Single(plan.Operations, operation => operation.Kind == "asset" && operation.Key == "mesh").Reason);
+        Assert.Equal("update", Assert.Single(plan.Operations, operation => operation.Key == "holder-0").Action);
+        Assert.Contains("migrated to resdb by a world save",
+            Assert.Single(plan.Operations, operation => operation.Kind == "asset" && operation.Key == "other").Reason);
+        Assert.Equal("no-op", Assert.Single(plan.Operations, operation => operation.Key == "holder-1").Action);
+        await service.ApplyAsync(document, new ApplyOptions(state));
+        Assert.Equal(["local://machine/asset-3", "resdb:///saved-other"], HolderUrls(client));
+        Assert.Equal("local://machine/asset-3", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+        Assert.Equal("resdb:///saved-other", StateAsset(state, "other")["url"]!.GetValue<string>());
+        var replanned = await service.PlanApplyAsync(document, new ApplyOptions(state));
+        Assert.Empty(replanned.Changes);
     }
 
     [Theory]
@@ -266,6 +296,14 @@ public sealed partial class ApplyWorkflowTests
         if (second is not null) holders[1].Members["URL"] = holders[1].Members["URL"] with { Value = JsonValue.Create(second) };
         client.ReloadWorld("session-saved");
         client.ResetWriteCounts();
+    }
+
+    // A state written before asset fields were recorded has no record on any Component.
+    private static void RemoveRecordedAssetFields(string state)
+    {
+        var legacy = JsonNode.Parse(File.ReadAllText(state))!;
+        foreach (var (_, component) in legacy["components"]!.AsObject()) component!.AsObject().Remove("assetFields");
+        File.WriteAllText(state, legacy.ToJsonString());
     }
 
     private static FakeResoniteClient.FakeComponent[] Holders(FakeResoniteClient client) =>

@@ -399,7 +399,11 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 cancellationToken.ThrowIfCancellationRequested();
                 asset.Url = asset.DirectUrl ?? (asset.Action == "no-op" && prepared.State.Assets.TryGetValue(asset.Key, out var saved)
                     ? asset.MigratedUrl ?? saved.Url : await client.ImportAssetAsync(asset.Spec, asset.ResolvedSource, cancellationToken));
-                if (asset.Action == "create") counts.AssetsImported++;
+                if (asset.Action == "create")
+                {
+                    counts.AssetsImported++;
+                    ForgetAssetEvidence(prepared, asset.Key);
+                }
                 else counts.AssetsUnchanged++;
                 prepared.State.Assets[asset.Key] = new ApplyStateAsset(asset.Spec.Kind, asset.SourceHash, asset.Url);
                 Checkpoint(prepared);
@@ -1188,6 +1192,24 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         }
     }
 
+    // A re-import leaves every live reference on the previous content until its field is written again, and a world save
+    // in between moves that content to resdb. Until the fields are written, the record must not offer those references as
+    // evidence, or an interrupted apply would adopt the previous content's URL. A state written before asset fields were
+    // recorded cannot tell which field held the asset, so only Components that declare it now stop counting.
+    private static void ForgetAssetEvidence(PreparedApply prepared, string key)
+    {
+        var declared = prepared.Components.Select(component => component.StableKey).ToHashSet(StringComparer.Ordinal);
+        var declaring = prepared.Components.Where(component => (component.Spec.Fields ?? new Dictionary<string, JsonElement>())
+            .Values.Any(value => ContainsAssetReference(value, key))).Select(component => component.StableKey).ToHashSet(StringComparer.Ordinal);
+        foreach (var (stableKey, saved) in prepared.State.Components.ToArray())
+        {
+            var fields = saved.AssetFields is { } applied
+                ? applied.Where(field => !ContainsAssetReference(field.Value, key)).ToDictionary(StringComparer.Ordinal)
+                : declared.Contains(stableKey) && !declaring.Contains(stableKey) ? null : new Dictionary<string, JsonElement>();
+            prepared.State.Components[stableKey] = saved with { AssetFields = fields };
+        }
+    }
+
     private static void BuildDeletionPlans(PreparedApply prepared)
     {
         var liveSlotKeys = prepared.Nodes.Select(x => x.StableKey).ToHashSet(StringComparer.Ordinal);
@@ -1324,11 +1346,13 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         _ => false
     };
 
-    private static bool ContainsAssetReference(JsonElement value) => value.ValueKind switch
+    // With a key, only references to that asset count.
+    private static bool ContainsAssetReference(JsonElement value, string? key = null) => value.ValueKind switch
     {
-        JsonValueKind.String => value.GetString()?.StartsWith("$asset:", StringComparison.Ordinal) == true,
-        JsonValueKind.Array => value.EnumerateArray().Any(ContainsAssetReference),
-        JsonValueKind.Object => value.EnumerateObject().Any(property => ContainsAssetReference(property.Value)),
+        JsonValueKind.String => value.GetString() is { } text && (key is null
+            ? text.StartsWith("$asset:", StringComparison.Ordinal) : text == "$asset:" + key),
+        JsonValueKind.Array => value.EnumerateArray().Any(item => ContainsAssetReference(item, key)),
+        JsonValueKind.Object => value.EnumerateObject().Any(property => ContainsAssetReference(property.Value, key)),
         _ => false
     };
 
