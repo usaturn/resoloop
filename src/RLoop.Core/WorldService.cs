@@ -398,7 +398,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 asset.Url = asset.DirectUrl ?? (asset.Action == "no-op" && prepared.State.Assets.TryGetValue(asset.Key, out var saved)
-                    ? saved.Url : await client.ImportAssetAsync(asset.Spec, asset.ResolvedSource, cancellationToken));
+                    ? asset.MigratedUrl ?? saved.Url : await client.ImportAssetAsync(asset.Spec, asset.ResolvedSource, cancellationToken));
                 if (asset.Action == "create") counts.AssetsImported++;
                 else counts.AssetsUnchanged++;
                 prepared.State.Assets[asset.Key] = new ApplyStateAsset(asset.Spec.Kind, asset.SourceHash, asset.Url);
@@ -654,8 +654,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         var byKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null)
             .ToDictionary(x => x.Spec.Key!, x => x, StringComparer.Ordinal);
         var slotsByKey = prepared.Nodes.ToDictionary(x => x.StableKey, StringComparer.Ordinal);
-        var assetUrls = prepared.Assets.Where(x => x.DirectUrl is not null || prepared.State.Assets.ContainsKey(x.Key))
-            .ToDictionary(x => x.Key, x => x.DirectUrl ?? prepared.State.Assets[x.Key].Url, StringComparer.Ordinal);
+        var assetUrls = PlanAssetUrls(prepared);
         var results = new List<ApplyTestCaseResult>();
         foreach (var test in document.Tests ?? [])
         {
@@ -1040,11 +1039,11 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             }
         }
 
+        DetectSavedAssetMigrations(prepared);
         var existingByKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null)
             .ToDictionary(x => x.Spec.Key!, x => x, StringComparer.Ordinal);
         var slotsByKey = prepared.Nodes.ToDictionary(x => x.StableKey, StringComparer.Ordinal);
-        var assetUrls = prepared.Assets.Where(x => x.DirectUrl is not null || prepared.State.Assets.ContainsKey(x.Key))
-            .ToDictionary(x => x.Key, x => x.DirectUrl ?? prepared.State.Assets[x.Key].Url, StringComparer.Ordinal);
+        var assetUrls = PlanAssetUrls(prepared);
         foreach (var component in prepared.Components)
         {
             var action = component.RelocationSource is not null ? "relocate" : component.Existing is null ? "create" : "no-op";
@@ -1122,6 +1121,56 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             prepared.Entries.Insert(0, new ApplyPlanEntry(runtime.Action, "asset", "$assets/" + pair.Key, pair.Key, pair.Value.Kind,
                 Reason: direct is not null ? "asset URI is already addressable" : unchanged ?
                     "source hash and imported URL match state" : "source is new or changed and must be imported"));
+        }
+    }
+
+    private static Dictionary<string, string> PlanAssetUrls(PreparedApply prepared) =>
+        prepared.Assets.Where(x => x.DirectUrl is not null || prepared.State.Assets.ContainsKey(x.Key))
+            .ToDictionary(x => x.Key, x => x.DirectUrl ?? x.MigratedUrl ?? prepared.State.Assets[x.Key].Url, StringComparer.Ordinal);
+
+    // Saving a world moves imported local:// assets into the saved record and rewrites every live URL to resdb:///.
+    // State still holds the local URL, so an unchanged asset would otherwise push the unportable local URL back.
+    // Adopt the live URL only when every managed reference observed the same resdb URI.
+    private static void DetectSavedAssetMigrations(PreparedApply prepared)
+    {
+        var candidates = prepared.Assets.Where(asset => asset.Action == "no-op" && asset.DirectUrl is null &&
+                prepared.State.Assets.TryGetValue(asset.Key, out var saved) &&
+                Uri.TryCreate(saved.Url, UriKind.Absolute, out var uri) && uri.Scheme == "local")
+            .ToDictionary(asset => asset.Key, StringComparer.Ordinal);
+        if (candidates.Count == 0) return;
+        var observed = new Dictionary<string, List<string?>>(StringComparer.Ordinal);
+        void Collect(JsonElement desired, MemberValue? live)
+        {
+            if (desired.ValueKind == JsonValueKind.String)
+            {
+                var text = desired.GetString() ?? string.Empty;
+                if (!text.StartsWith("$asset:", StringComparison.Ordinal) || !candidates.ContainsKey(text[7..])) return;
+                if (!observed.TryGetValue(text[7..], out var values)) observed[text[7..]] = values = [];
+                values.Add(live is { Kind: "field", Value: JsonValue value } && value.TryGetValue<string>(out var url) ? url : null);
+            }
+            else if (desired.ValueKind == JsonValueKind.Array)
+            {
+                var elements = live?.Elements ?? [];
+                var index = 0;
+                foreach (var item in desired.EnumerateArray())
+                    Collect(item, index < elements.Count ? elements[index++] : null);
+            }
+            else if (desired.ValueKind == JsonValueKind.Object)
+                foreach (var property in desired.EnumerateObject())
+                    Collect(property.Value, live?.Members?.GetValueOrDefault(property.Name));
+        }
+        foreach (var component in prepared.Components.Where(x => x.Existing is not null))
+            foreach (var field in component.Spec.Fields ?? new Dictionary<string, JsonElement>())
+                Collect(field.Value, component.Existing!.Members?.GetValueOrDefault(field.Key));
+        foreach (var (key, values) in observed)
+        {
+            var live = values.Distinct(StringComparer.Ordinal).ToArray();
+            if (live is not [{ } url] || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "resdb") continue;
+            candidates[key].MigratedUrl = url;
+            var index = prepared.Entries.FindIndex(entry => entry.Kind == "asset" && entry.Key == key);
+            if (index >= 0)
+                prepared.Entries[index] = prepared.Entries[index] with
+                { Reason = "asset URL was migrated to resdb by a world save; state will record the live URL" };
         }
     }
 
@@ -2009,5 +2058,6 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         public string? DirectUrl { get; } = directUrl;
         public string Action { get; } = action;
         public string? Url { get; set; }
+        public string? MigratedUrl { get; set; }
     }
 }
