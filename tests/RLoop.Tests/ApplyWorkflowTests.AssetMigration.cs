@@ -48,6 +48,56 @@ public sealed partial class ApplyWorkflowTests
         Assert.Empty(replanned.Changes);
     }
 
+    [Fact]
+    public async Task AssetUrlMigratedByWorldSaveIsAdoptedWhenItsOnlyReferenceIsRelocated()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root, "crate.bin"), "first crate");
+        var initial = ReloadDocument("saved-relocated", """
+            {"schemaVersion":"1","ownership":{"key":"saved-relocated"},"slot":{"key":"root","name":"SavedAssets","parent":"Root"},
+             "assets":{"mesh":{"kind":"mesh","source":"crate.bin"}},
+             "children":[
+               {"slot":{"key":"crate-a","name":"CrateA"},"components":[{"key":"mesh-a","type":"Test.AssetHolder","fields":{"URL":"$asset:mesh"}}]},
+               {"slot":{"key":"crate-b","name":"CrateB"}}]}
+            """);
+        var moved = ReloadDocument("saved-relocated-moved", """
+            {"schemaVersion":"1","ownership":{"key":"saved-relocated"},"slot":{"key":"root","name":"SavedAssets","parent":"Root"},
+             "assets":{"mesh":{"kind":"mesh","source":"crate.bin"}},
+             "children":[
+               {"slot":{"key":"crate-a","name":"CrateA"}},
+               {"slot":{"key":"crate-b","name":"CrateB"},"components":[{"key":"mesh-a","type":"Test.AssetHolder","fields":{"URL":"$asset:mesh"}}]}]}
+            """);
+        var client = new FakeResoniteClient(initial) { ImportUrlPrefix = "local://machine/asset-" };
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, "saved-relocated.state.json");
+        await service.ApplyAsync(initial, new ApplyOptions(state));
+        var holder = Assert.Single(Holders(client));
+        holder.Members["URL"] = holder.Members["URL"] with { Value = JsonValue.Create("resdb:///saved-crate") };
+        client.ReloadWorld("session-saved");
+        client.ResetWriteCounts();
+        var stateHash = SHA256.HashData(File.ReadAllBytes(state));
+
+        var plan = await service.PlanApplyAsync(moved, new ApplyOptions(state));
+
+        var asset = Assert.Single(plan.Operations, operation => operation.Kind == "asset");
+        Assert.Equal("no-op", asset.Action);
+        Assert.Contains("migrated to resdb by a world save", asset.Reason);
+        Assert.Equal("relocate", Assert.Single(plan.Operations, operation => operation.Kind == "component").Action);
+        Assert.Equal(stateHash, SHA256.HashData(File.ReadAllBytes(state)));
+
+        var applied = await service.ApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(1, applied.ComponentsAdded);
+        Assert.Equal(1, applied.ComponentsDeleted);
+        Assert.Equal(1, client.AssetImports);
+        Assert.Equal("resdb:///saved-crate", Assert.Single(HolderUrls(client)));
+        Assert.Equal("resdb:///saved-crate", StateAsset(state, "mesh")["url"]!.GetValue<string>());
+
+        client.ResetWriteCounts();
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        var replanned = await service.PlanApplyAsync(moved, new ApplyOptions(state));
+        Assert.Empty(replanned.Changes);
+    }
+
     [Theory]
     [InlineData("resdb:///saved-a", "resdb:///saved-b")]
     [InlineData("resdb:///saved-a", null)]

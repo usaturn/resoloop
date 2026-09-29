@@ -1131,6 +1131,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
     // Saving a world moves imported local:// assets into the saved record and rewrites every live URL to resdb:///.
     // State still holds the local URL, so an unchanged asset would otherwise push the unportable local URL back.
     // Adopt the live URL only when every managed reference observed the same resdb URI.
+    // A relocated Component is observed through the live Component it replaces.
     private static void DetectSavedAssetMigrations(PreparedApply prepared)
     {
         var candidates = prepared.Assets.Where(asset => asset.Action == "no-op" && asset.DirectUrl is null &&
@@ -1159,9 +1160,13 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 foreach (var property in desired.EnumerateObject())
                     Collect(property.Value, live?.Members?.GetValueOrDefault(property.Name));
         }
-        foreach (var component in prepared.Components.Where(x => x.Existing is not null))
+        foreach (var component in prepared.Components)
+        {
+            var live = component.Existing ?? component.RelocationSource;
+            if (live is null) continue;
             foreach (var field in component.Spec.Fields ?? new Dictionary<string, JsonElement>())
-                Collect(field.Value, component.Existing!.Members?.GetValueOrDefault(field.Key));
+                Collect(field.Value, live.Members?.GetValueOrDefault(field.Key));
+        }
         foreach (var (key, values) in observed)
         {
             var live = values.Distinct(StringComparer.Ordinal).ToArray();
