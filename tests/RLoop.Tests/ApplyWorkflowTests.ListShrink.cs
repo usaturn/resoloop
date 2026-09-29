@@ -252,6 +252,61 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    // Until the replacement exists its key has no saved ID, so resolving it again must not bind a same-type sibling that
+    // another key holds. Otherwise apply stops on an ownership conflict however often it is re-run.
+    [Theory]
+    [InlineData("before-add")]
+    [InlineData("lost-add-response")]
+    public async Task InterruptedRecreateNextToASameTypeSiblingResumes(string failure)
+    {
+        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"south"}}""";
+        var name = "shrink-resume-sibling-" + failure;
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name, extraComponents: sibling);
+        var siblingId = StateComponent(state, "sibling")["id"]!.GetValue<string>();
+        var three = ShrinkDocument(name, 3, extraComponents: sibling);
+        if (failure == "lost-add-response") client.LoseNextComponentCreateResponse = true;
+        else client.FailOnWrite = 1;
+
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
+        client.FailOnWrite = null;
+        var plan = await service.PlanApplyAsync(three, new ApplyOptions(state));
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        Assert.Equal("recreate", Assert.Single(plan.Changes).Action);
+        var renderer = Renderer(client);
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([siblingId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // The same holds for a new key declared next to a managed Component of its type.
+    [Fact]
+    public async Task InterruptedCreateOfANewKeyNextToAManagedSameTypeComponentResumes()
+    {
+        const string extra = """,{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}}""";
+        var (client, service, state, rendererId) = await ApplyFourMaterialsAsync("new-key-resume");
+        var withExtra = ShrinkDocument("new-key-resume", 4, extraComponents: extra);
+        client.FailOnWrite = 1;
+
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(withExtra, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
+
+        var added = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" && component.Id != rendererId);
+        Assert.Equal(rendererId, Renderer(client).Id);
+        Assert.Equal(rendererId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Equal(added.Id, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        client.ResetWriteCounts();
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

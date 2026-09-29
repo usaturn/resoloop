@@ -1083,8 +1083,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 var superseded = prepared.SameSession && stateComponent?.SupersededId is { Length: > 0 } supersededId
                     ? FindSnapshotComponent(prepared, supersededId) : null;
                 var existing = relocating || newManagedComponent ? null :
-                    MatchComponent(Without(node.Existing?.Components ?? [], superseded), spec.Type, ordinal, stateComponent, prepared.SameSession,
-                        topologyTargets);
+                    MatchComponent(WithoutHeldByOtherKeys(prepared, stableKey, stateComponent, Without(node.Existing?.Components ?? [], superseded)),
+                        spec.Type, ordinal, stateComponent, prepared.SameSession, topologyTargets);
                 string? recreateReason = null;
                 if (existing is not null && superseded is null && ListShrinkReason(spec, existing) is { } shrink)
                     (superseded, existing, recreateReason) = (existing, null, shrink);
@@ -1173,6 +1173,18 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
 
     private static IReadOnlyList<ComponentSummary> Without(IReadOnlyList<ComponentSummary> components, ComponentSummary? excluded) =>
         excluded is null ? components : components.Where(component => component.Id != excluded.Id).ToArray();
+
+    // A create interrupted before it ran saved no ID, so only type, member names and index are left to match by, and they can
+    // pick a same-type Component another key holds. Every re-run would then stop on an ownership conflict. In the same session
+    // the other keys' saved IDs are exact, so leave their Components to them.
+    private static IReadOnlyList<ComponentSummary> WithoutHeldByOtherKeys(PreparedApply prepared, string key, ApplyStateComponent? state,
+        IReadOnlyList<ComponentSummary> components)
+    {
+        if (!prepared.SameSession || state?.Id is not { Length: 0 }) return components;
+        var held = prepared.State.Components.Where(pair => pair.Key != key)
+            .SelectMany(pair => new[] { pair.Value.Id, pair.Value.SupersededId }).ToHashSet(StringComparer.Ordinal);
+        return components.Where(component => !held.Contains(component.Id)).ToArray();
+    }
 
     private static RLoopException InterruptedRecreateAcrossSession(PreparedApply prepared, string key, ApplyStateComponent state,
         SlotInfo? slot, string slotPath) =>
