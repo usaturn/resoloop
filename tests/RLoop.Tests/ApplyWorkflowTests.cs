@@ -1465,6 +1465,8 @@ public sealed partial class ApplyWorkflowTests : IDisposable
         public string SessionId { get; set; } = "session-1";
         public bool LoseNextSlotCreateResponse { get; set; }
         public bool LoseNextComponentCreateResponse { get; set; }
+        // Simulates runtime logic that fills members of a new Component, such as a list sized by its asset.
+        public Action<FakeComponent>? AfterComponentAdded { get; set; }
         // Members that behave like a runtime SyncList: an update replaces leading elements but never removes any,
         // as observed on Resonite 2026.9.18.82 / ResoniteLink 0.13.1. Other JSON arrays stay plain fields.
         public HashSet<string> ListMembers { get; } = new(StringComparer.Ordinal) { "Materials" };
@@ -1557,6 +1559,7 @@ public sealed partial class ApplyWorkflowTests : IDisposable
             SetFields(component, fields);
             if (TargetClaimedBy is not null && _components.ContainsKey(TargetClaimedBy) && fields.ContainsKey("Target"))
                 component.Members["Target"] = new MemberValue("reference", id + ":Target");
+            AfterComponentAdded?.Invoke(component);
             _components[id] = component;
             _slots[slotId].Components.Add(component);
             if (LoseNextComponentCreateResponse)

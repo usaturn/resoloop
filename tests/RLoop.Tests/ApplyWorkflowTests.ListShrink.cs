@@ -247,4 +247,92 @@ public sealed partial class ApplyWorkflowTests
         Assert.Empty(replanned.Changes);
         Assert.Equal(0, client.Writes);
     }
+
+    // A reload renumbers both halves of an interrupted recreate, so supersededId no longer identifies the old Component.
+    // Without identityFields the index tie-break would pick the old one, recreate again, and orphan the replacement.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InterruptedListShrinkRecreateStopsBeforeMutationAfterWorldReload(bool identity)
+    {
+        var name = "shrink-reload-" + identity;
+        var (client, service, state, _) = await ApplyFourMaterialsAsync(name, identity ? Identity : "");
+        var three = ShrinkDocument(name, 3, identity ? Identity : "");
+        client.FailOnWrite = 2;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        client.ReloadWorld("session-reloaded");
+        client.ResetWriteCounts();
+        var renderers = Rubble(client).Components.Where(component => component.Type == "Test.Renderer").Select(component => component.Id).ToArray();
+        Assert.Equal(2, renderers.Length);
+        var stateHash = SHA256.HashData(File.ReadAllBytes(state));
+
+        var planError = await Assert.ThrowsAsync<RLoopException>(() => service.PlanApplyAsync(three, new ApplyOptions(state)));
+        var applyError = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", planError.Code);
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", applyError.Code);
+        var context = System.Text.Json.JsonSerializer.Serialize(applyError.Context);
+        Assert.All(renderers, id => Assert.Contains(id, context));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(renderers, Rubble(client).Components.Where(component => component.Type == "Test.Renderer").Select(component => component.Id));
+        Assert.Equal(stateHash, SHA256.HashData(File.ReadAllBytes(state)));
+    }
+
+    [Fact]
+    public async Task RecreatedComponentAdoptsAnAssetUrlMigratedByAWorldSave()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root, "crate.bin"), "first crate");
+        ApplyDocument Build(int materials)
+        {
+            var json = JsonNode.Parse(File.ReadAllText(ShrinkDocument("shrink-asset", materials).SourcePath!))!;
+            json["assets"] = JsonNode.Parse("""{"mesh":{"kind":"mesh","source":"crate.bin"}}""");
+            json["children"]![0]!["components"]![0]!["fields"]!["URL"] = "$asset:mesh";
+            return ReloadDocument("shrink-asset", json.ToJsonString());
+        }
+        var four = Build(4);
+        var client = new FakeResoniteClient(four) { ImportUrlPrefix = "local://machine/asset-" };
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, "shrink-asset.state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        var renderer = Renderer(client);
+        renderer.Members["URL"] = renderer.Members["URL"] with { Value = JsonValue.Create("resdb:///saved-crate") };
+        client.ReloadWorld("session-saved");
+        client.ResetWriteCounts();
+        var three = Build(3);
+
+        var plan = await service.PlanApplyAsync(three, new ApplyOptions(state));
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        Assert.Contains("migrated to resdb", Assert.Single(plan.Operations, operation => operation.Kind == "asset").Reason);
+        Assert.Equal("resdb:///saved-crate", Renderer(client).Members["URL"].Value!.GetValue<string>());
+        Assert.Equal("resdb:///saved-crate", JsonNode.Parse(File.ReadAllText(state))!["assets"]!["mesh"]!["url"]!.GetValue<string>());
+        Assert.Equal(1, client.AssetImports);
+    }
+
+    [Fact]
+    public async Task RecreateThatTheRuntimeRefillsStopsInsteadOfRecreatingOnEveryApply()
+    {
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync("shrink-refill");
+        var three = ShrinkDocument("shrink-refill", 3);
+        client.AfterComponentAdded = component =>
+        {
+            if (component.Type != "Test.Renderer") return;
+            var materials = component.Members["Materials"];
+            component.Members["Materials"] = materials with
+            {
+                Elements = [.. materials.Elements!, new MemberValue("reference", component.Id + ":Materials[3]", TargetId: "null")]
+            };
+        };
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+            Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+            Assert.Contains("Materials", System.Text.Json.JsonSerializer.Serialize(error.Context));
+            Assert.Equal(oldId, Renderer(client).Id);
+            Assert.Equal(oldId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+            Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        }
+    }
 }
