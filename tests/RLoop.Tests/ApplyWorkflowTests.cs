@@ -1464,6 +1464,10 @@ public sealed partial class ApplyWorkflowTests : IDisposable
         public CancellationTokenSource? Cancellation { get; set; }
         public string SessionId { get; set; } = "session-1";
         public bool LoseNextSlotCreateResponse { get; set; }
+        public bool LoseNextComponentCreateResponse { get; set; }
+        // Members that behave like a runtime SyncList: an update replaces leading elements but never removes any,
+        // as observed on Resonite 2026.9.18.82 / ResoniteLink 0.13.1. Other JSON arrays stay plain fields.
+        public HashSet<string> ListMembers { get; } = new(StringComparer.Ordinal) { "Materials" };
         public int AssetImports { get; private set; }
         public string ImportUrlPrefix { get; set; } = "resdb:///asset-";
         public List<string> DescribedTypes { get; } = [];
@@ -1555,6 +1559,11 @@ public sealed partial class ApplyWorkflowTests : IDisposable
                 component.Members["Target"] = new MemberValue("reference", id + ":Target");
             _components[id] = component;
             _slots[slotId].Components.Add(component);
+            if (LoseNextComponentCreateResponse)
+            {
+                LoseNextComponentCreateResponse = false;
+                throw new OperationCanceledException("Simulated lost component create response.");
+            }
             return Task.FromResult(new ComponentCreateResult(id, componentType));
         }
 
@@ -1686,12 +1695,26 @@ public sealed partial class ApplyWorkflowTests : IDisposable
             _slots.Remove(slot.Id);
         }
 
-        private static void SetFields(FakeComponent component, IReadOnlyDictionary<string, string> fields)
+        private void SetFields(FakeComponent component, IReadOnlyDictionary<string, string> fields)
         {
             foreach (var field in fields)
             {
                 var id = component.Id + ":" + field.Key;
-                if (field.Key is "Target" or "Mesh" or "TargetValue" ||
+                if (ListMembers.Contains(field.Key) && JsonNode.Parse(field.Value) is JsonArray items)
+                {
+                    var elements = component.Members.TryGetValue(field.Key, out var current) && current.Kind == "list"
+                        ? current.Elements!.ToList() : [];
+                    for (var i = 0; i < items.Count; i++)
+                    {
+                        var raw = items[i] is JsonValue item && item.TryGetValue<string>(out var text) ? text : items[i]?.ToJsonString() ?? "null";
+                        var element = raw.StartsWith("C", StringComparison.Ordinal) || raw.StartsWith("S", StringComparison.Ordinal)
+                            ? new MemberValue("reference", $"{id}[{i}]", TargetId: raw)
+                            : new MemberValue("field", $"{id}[{i}]", "value", JsonNode.Parse(raw));
+                        if (i < elements.Count) elements[i] = element; else elements.Add(element);
+                    }
+                    component.Members[field.Key] = new MemberValue("list", id, Elements: elements);
+                }
+                else if (field.Key is "Target" or "Mesh" or "TargetValue" ||
                     field.Value.StartsWith("C", StringComparison.Ordinal) || field.Value.StartsWith("S", StringComparison.Ordinal))
                     component.Members[field.Key] = new MemberValue("reference", id, TargetId: field.Value);
                 else

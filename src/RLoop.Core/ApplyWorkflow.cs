@@ -612,7 +612,8 @@ internal sealed record ApplyStateSlot(string Id, string Path, bool RuntimeReloca
 internal sealed record ApplyStateComponent(string Id, string SlotKey, string Type, int TypeOrdinal,
     int? ComponentIndex = null, IReadOnlyList<string>? MemberNames = null,
     IReadOnlyDictionary<string, string>? IdentityValues = null,
-    IReadOnlyDictionary<string, string>? ReferenceSelectors = null);
+    IReadOnlyDictionary<string, string>? ReferenceSelectors = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SupersededId = null);
 internal sealed record ApplyStateAsset(string Kind, string SourceHash, string Url);
 
 internal sealed class ApplyState
