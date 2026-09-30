@@ -1406,4 +1406,98 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(siblingIds[0], StateComponent(state, "sibling")["id"]!.GetValue<string>());
         Assert.Equal(siblingIds[1], StateComponent(state, "sibling2")["id"]!.GetValue<string>());
     }
+
+    // Rubble's renderer, and after it the key "old", which a later document drops without --prune.
+    private async Task<(FakeResoniteClient Client, WorldService Service, string State)> DropOldAfterRendererAsync(string name, bool dropNow)
+    {
+        var four = RubbleDocument(name, [RendererSpec("renderer", "north", 4), RendererSpec("old", "south", 4)]);
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        if (dropNow) await service.ApplyAsync(RubbleDocument(name, [RendererSpec("renderer", "north", 4)]), new ApplyOptions(state));
+        client.ResetWriteCounts();
+        return (client, service, state);
+    }
+
+    // The undeclared key "old" is found by its label: an apply after a world reload does not refresh its saved ID.
+    private static void AssertUndeclaredIndexMatchesRubble(FakeResoniteClient client, string state) =>
+        Assert.Equal(Rubble(client).Components.IndexOf(LabeledRenderer(client, "south")),
+            StateComponent(state, "old")["componentIndex"]!.GetValue<int>());
+
+    // A key dropped from the document without --prune keeps its Component and state entry, and after a world reload it is
+    // bound by its saved index. A recreate appends its replacement where the Components after the replaced one move up, so
+    // such a key is saved at its index in the layout apply leaves, as the declared keys are, whether this apply or an earlier
+    // one dropped it and whether the world was reloaded before the recreate. Otherwise it binds the replacement, and every plan
+    // and apply stops on an ownership conflict.
+    [Theory]
+    [InlineData("same-apply")]
+    [InlineData("earlier-apply")]
+    [InlineData("earlier-apply-then-reload")]
+    public async Task UndeclaredKeyOnARecreatingSlotKeepsAnIndexAWorldReloadBinds(string dropped)
+    {
+        var name = "shrink-undeclared-" + dropped;
+        var (client, service, state) = await DropOldAfterRendererAsync(name, dropNow: dropped != "same-apply");
+        if (dropped == "earlier-apply-then-reload") client.ReloadWorld("session-before-recreate");
+        var three = RubbleDocument(name, [RendererSpec("renderer", "north", 3)]);
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        AssertUndeclaredIndexMatchesRubble(client, state);
+        client.ReloadWorld("session-reloaded");
+        var rendererId = Renderer(client).Id;
+        var plan = await service.PlanApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(["delete:old"], plan.Changes.Select(change => change.Action + ":" + change.Key));
+        await service.ApplyAsync(three, new ApplyOptions(state, Prune: true, ConfirmDeletes: true));
+        Assert.Equal([rendererId], RendererIds(Rubble(client)));
+        Assert.Equal(rendererId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(JsonNode.Parse(File.ReadAllText(state))!["components"]!["old"]);
+    }
+
+    // The checkpoint that saves supersededId saves the undeclared key at its index in the layout the recreate leaves, as it does
+    // the declared keys, so after a world reload the hint's recovery (remove the replaced Component) leaves the layout it describes.
+    [Fact]
+    public async Task InterruptedRecreateSavesAnUndeclaredKeyAtTheIndexTheReloadHintLeaves()
+    {
+        const string name = "shrink-undeclared-hint";
+        var (client, service, state) = await DropOldAfterRendererAsync(name, dropNow: true);
+        var three = RubbleDocument(name, [RendererSpec("renderer", "north", 3)]);
+        await InterruptBeforeRemovingReplacedAsync(client, service, three, state);
+        client.ReloadWorld("session-reloaded");
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", error.Code);
+
+        var replaced = Rubble(client).Components.Where(component => component.Type == "Test.Renderer" &&
+            component.Members["Label"].Value!.GetValue<string>() == "north").MaxBy(component => MaterialTargets(component).Length)!;
+        await client.RemoveComponentAsync(replaced.Id);
+        var saved = JsonNode.Parse(File.ReadAllText(state))!;
+        saved["components"]!["renderer"]!.AsObject().Remove("supersededId");
+        File.WriteAllText(state, saved.ToJsonString());
+
+        AssertUndeclaredIndexMatchesRubble(client, state);
+        var plan = await service.PlanApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(["delete:old"], plan.Changes.Select(change => change.Action + ":" + change.Key));
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // Undoing a recreate keeps the replaced Component where it is, so the undeclared key goes back to its index in that layout.
+    [Fact]
+    public async Task UndoneRecreateKeepsAnUndeclaredKeyIndexAWorldReloadBinds()
+    {
+        const string name = "shrink-undeclared-undo";
+        var (client, service, state) = await DropOldAfterRendererAsync(name, dropNow: true);
+        RefillRenderers(client);
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() =>
+            service.ApplyAsync(RubbleDocument(name, [RendererSpec("renderer", "north", 3)]), new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        AssertUndeclaredIndexMatchesRubble(client, state);
+        client.AfterComponentAdded = null;
+        client.ReloadWorld("session-reloaded");
+        var plan = await service.PlanApplyAsync(RubbleDocument(name, [RendererSpec("renderer", "north", 4)]), new ApplyOptions(state));
+        Assert.Equal(["delete:old"], plan.Changes.Select(change => change.Action + ":" + change.Key));
+    }
 }

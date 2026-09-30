@@ -452,10 +452,11 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             // A world reload binds keys by their saved indexes. Until a recreate saves supersededId the Slot keeps the replaced
             // Component and state keeps its ID, so the Components on a recreating Slot, new ones included, are saved at their
             // current indexes. The checkpoint that saves the Slot's first supersededId saves every key on it, including ones
-            // created earlier in this apply, at its final index, as the recreate's create can stop the apply before the keys
-            // declared after it are saved again: removing the replaced Component by hand, as the reload hint says, then leaves
-            // the layout their saved indexes describe. A Slot that already saved supersededId before this apply is saved at its
-            // final indexes, so a resumed recreate does not put its keys back at current indexes.
+            // created earlier in this apply and ones the document no longer declares, at its final index, as the recreate's
+            // create can stop the apply before the keys declared after it are saved again: removing the replaced Component by
+            // hand, as the reload hint says, then leaves the layout their saved indexes describe. A Slot that already saved
+            // supersededId before this apply is saved at its final indexes, so a resumed recreate does not put its keys back at
+            // current indexes.
             var recreatingNodes = prepared.Components.Where(component => component.Superseded is not null && !component.Node.SavedFinalIndexes)
                 .Select(component => component.Node).ToHashSet();
             // Until the Slot's first supersededId is saved, a Component is saved at its index in the layout the Slot has.
@@ -465,9 +466,14 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (component.Superseded is not null && recreatingNodes.Remove(component.Node))
-                    foreach (var bound in prepared.Components.Where(bound => bound.Node == component.Node))
+                {
+                    var group = prepared.Components.Where(bound => bound.Node == component.Node).ToArray();
+                    foreach (var bound in group)
                         if (prepared.State.Components.TryGetValue(bound.StableKey, out var saved) && saved.SlotKey == component.Node.StableKey)
                             prepared.State.Components[bound.StableKey] = saved with { ComponentIndex = bound.ComponentIndex };
+                    SaveUndeclaredIndexes(prepared, component.Node, group.Where(bound => bound.Superseded is not null)
+                        .Select(bound => bound.Superseded!.Id).ToHashSet(StringComparer.Ordinal));
+                }
                 if (component.Existing is not null)
                 {
                     component.Id = component.Existing.Id;
@@ -535,8 +541,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             }
 
             // Removing a Component shifts the ones after it on its Slot, and a world reload binds keys by their saved indexes.
-            // After each removal the keys declared on that Slot are saved at their indexes in the layout left once the removals so
-            // far and the Slot's pending recreates are done; the checkpoint that follows the removal keeps them.
+            // After each removal the keys on that Slot, declared or not, are saved at their indexes in the layout left once the
+            // removals so far and the Slot's pending recreates are done; the checkpoint that follows the removal keeps them.
             var removedIds = new HashSet<string>(StringComparer.Ordinal);
             void SaveIndexesAfterRemoving(string id)
             {
@@ -549,6 +555,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 foreach (var component in group)
                     if (prepared.State.Components.TryGetValue(component.StableKey, out var saved) && saved.SlotKey == node.StableKey)
                         prepared.State.Components[component.StableKey] = saved with { ComponentIndex = component.ComponentIndex };
+                SaveUndeclaredIndexes(prepared, node, removed);
             }
 
             foreach (var component in prepared.Components)
@@ -1308,14 +1315,33 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             [$"If an interrupted apply created Component '{matched.Id}', remove it in Resonite. Otherwise this document does not manage it, so leave it in place.",
              "Then remove this key from the state file and re-run apply; apply creates the Component."]);
 
+    private static List<string> KeptComponentIds(NodeRuntime node, IReadOnlySet<string> removed) =>
+        (node.Existing?.Components ?? []).Select(component => component.Id).Where(id => !removed.Contains(id)).ToList();
+
     // Records each managed Component's index in the Slot layout left once the removed Components are gone and new ones appended.
     private static void AssignComponentIndexes(NodeRuntime node, IEnumerable<ComponentRuntime> group, IReadOnlySet<string> removed,
         Func<ComponentRuntime, string?> keptId)
     {
-        var kept = (node.Existing?.Components ?? []).Select(component => component.Id).Where(id => !removed.Contains(id)).ToList();
+        var kept = KeptComponentIds(node, removed);
         var appended = 0;
         foreach (var component in group)
             component.ComponentIndex = keptId(component) is { } id ? kept.IndexOf(id) : kept.Count + appended++;
+    }
+
+    // A key the document no longer declares keeps its Component and state entry until a prune, and a world reload binds it
+    // by its saved index as it binds the declared keys, so save each such key on the Slot at its index in the same layout.
+    // Its Component is the one its deletion plan matched before any mutation, as its saved ID is stale after a world reload.
+    // A key no plan matched, or whose Component is removed, keeps its saved index.
+    private static void SaveUndeclaredIndexes(PreparedApply prepared, NodeRuntime node, IReadOnlySet<string> removed)
+    {
+        var kept = KeptComponentIds(node, removed);
+        foreach (var deletion in prepared.Deletions.Where(deletion => deletion.Kind == "component"))
+        {
+            var index = kept.IndexOf(deletion.Id);
+            if (index >= 0 && prepared.State.Components.TryGetValue(deletion.Key, out var saved) &&
+                saved.SlotKey == node.StableKey && saved.SupersededId != deletion.Id)
+                prepared.State.Components[deletion.Key] = saved with { ComponentIndex = index };
+        }
     }
 
     // Undoing a recreate keeps the replaced Component where it is and drops the replacement, or leaves it in place when it was
@@ -1330,6 +1356,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         foreach (var component in group.Where(component => component != undone))
             if (prepared.State.Components.TryGetValue(component.StableKey, out var saved))
                 prepared.State.Components[component.StableKey] = saved with { ComponentIndex = component.ComponentIndex };
+        SaveUndeclaredIndexes(prepared, undone.Node, removed);
         prepared.State.Components[undone.StableKey] = (undone.PreviousState ?? CreateComponentState(undone, string.Empty))
             with { Id = undone.Superseded!.Id, SupersededId = null, ComponentIndex = undone.ComponentIndex };
     }

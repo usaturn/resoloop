@@ -95,6 +95,35 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(ids[1], StateComponent(state, "sibling")["id"]!.GetValue<string>());
     }
 
+    // A key dropped from the document without --prune stays on the Slot, so moving a Component in front of it off the Slot
+    // shifts it too. It is saved at its new index, so after a world reload it does not bind the declared key's Component after it.
+    [Fact]
+    public async Task UndeclaredKeyLeftOnASlotAComponentMovesOffKeepsAnIndexAWorldReloadBinds()
+    {
+        const string name = "reload-undeclared-move";
+        var mover = RendererSpec("mover", "west", 1);
+        var tail = RendererSpec("tail", "east", 4);
+        var document = RubbleDocument(name, [mover, RendererSpec("old", "south", 4), tail]);
+        var client = new FakeResoniteClient(document);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(document, new ApplyOptions(state));
+        var moved = RubbleDocument(name, [tail], [mover]);
+
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+
+        AssertUndeclaredIndexMatchesRubble(client, state);
+        AssertSavedIndexesMatchRubble(client, state, "tail");
+        client.ReloadWorld("session-reloaded");
+        var tailId = LabeledRenderer(client, "east").Id;
+        var plan = await service.PlanApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(["delete:old"], plan.Changes.Select(change => change.Action + ":" + change.Key));
+        client.ResetWriteCounts();
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(tailId, StateComponent(state, "tail")["id"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task DistinctSlotsOnTheSameManagedPathStayAmbiguousAfterWorldReload()
     {
