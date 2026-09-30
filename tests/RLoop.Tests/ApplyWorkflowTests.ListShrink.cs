@@ -844,6 +844,72 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    // A resumed recreate on a Slot that already saved supersededId keeps every key there at its final index: an apply that
+    // stops again at a sibling's checkpoint must not save the sibling back at its index in the layout the Slot still has.
+    // The sibling is declared first but added by a later apply, so it sits after the renderer on the Slot.
+    [Theory]
+    [InlineData("before-add")]
+    [InlineData("before-remove")]
+    public async Task ResumedRecreateStoppedAtASiblingKeepsItsFinalIndexAcrossWorldReload(string failure)
+    {
+        const string sibling = """{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"south"}},""";
+        var name = "shrink-resume-stopped-at-sibling-" + failure;
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name);
+        await service.ApplyAsync(ShrinkDocument(name, 4, leadingComponents: sibling), new ApplyOptions(state));
+        var three = ShrinkDocument(name, 3, leadingComponents: sibling);
+        client.ResetWriteCounts();
+        client.FailOnWrite = failure == "before-add" ? 1 : 2;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Equal(oldId, StateComponent(state, "renderer")["supersededId"]!.GetValue<string>());
+        Assert.Equal(0, StateComponent(state, "sibling")["componentIndex"]!.GetValue<int>());
+
+        using var cancellation = new CancellationTokenSource();
+        var stopAtSibling = new ApplyOptions(state, Progress: progress =>
+        {
+            if (progress.Stage == "components" && progress.Path?.EndsWith("/@sibling", StringComparison.Ordinal) == true) cancellation.Cancel();
+        });
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, stopAtSibling, cancellation.Token)));
+        Assert.Equal(0, StateComponent(state, "sibling")["componentIndex"]!.GetValue<int>());
+        Assert.Equal(oldId, StateComponent(state, "renderer")["supersededId"]!.GetValue<string>());
+
+        client.ReloadWorld("session-reloaded");
+        client.ResetWriteCounts();
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", error.Code);
+        Assert.Equal(0, client.Writes);
+
+        var siblingId = LabeledRenderer(client, "south").Id;
+        var north = Rubble(client).Components.Where(component => component.Type == "Test.Renderer" &&
+            component.Members["Label"].Value!.GetValue<string>() == "north").ToArray();
+        var saved = JsonNode.Parse(File.ReadAllText(state))!;
+        if (failure == "before-add")
+        {
+            // The replacement's ID was not saved: remove every candidate with this key's fields, then the key.
+            foreach (var component in north) await client.RemoveComponentAsync(component.Id);
+            saved["components"]!.AsObject().Remove("renderer");
+        }
+        else
+        {
+            // Remove only the replaced Component, whose list is longer than declared, then supersededId.
+            await client.RemoveComponentAsync(north.MaxBy(component => MaterialTargets(component).Length)!.Id);
+            saved["components"]!["renderer"]!.AsObject().Remove("supersededId");
+        }
+        File.WriteAllText(state, saved.ToJsonString());
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([siblingId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        Assert.Equal(4, MaterialTargets(LabeledRenderer(client, "south")).Length);
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     [Fact]
     public async Task RecreatedComponentAdoptsAnAssetUrlMigratedByAWorldSave()
     {

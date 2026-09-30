@@ -454,8 +454,10 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             // current indexes. The checkpoint that saves the Slot's first supersededId saves every key on it, including ones
             // created earlier in this apply, at its final index, as the recreate's create can stop the apply before the keys
             // declared after it are saved again: removing the replaced Component by hand, as the reload hint says, then leaves
-            // the layout their saved indexes describe.
-            var recreatingNodes = prepared.Components.Where(component => component.Superseded is not null).Select(component => component.Node).ToHashSet();
+            // the layout their saved indexes describe. A Slot that already saved supersededId before this apply is saved at its
+            // final indexes, so a resumed recreate does not put its keys back at current indexes.
+            var recreatingNodes = prepared.Components.Where(component => component.Superseded is not null && !component.Node.SavedFinalIndexes)
+                .Select(component => component.Node).ToHashSet();
             // Until the Slot's first supersededId is saved, a Component is saved at its index in the layout the Slot has.
             ApplyStateComponent AtSavedLayout(ComponentRuntime component, ApplyStateComponent state) =>
                 recreatingNodes.Contains(component.Node) ? state with { ComponentIndex = component.CurrentIndex } : state;
