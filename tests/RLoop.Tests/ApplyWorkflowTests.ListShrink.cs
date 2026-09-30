@@ -440,6 +440,63 @@ public sealed partial class ApplyWorkflowTests
         AssertUnmanagedRendererUnchanged(client, unmanagedId);
     }
 
+    // Without a saved ID a key whose create was interrupted matches by type and position alone. A Component matched that way
+    // whose list is longer than declared may be one this document does not manage, so apply stops instead of recreating, and
+    // so removing, it. Removing the key from state, as the hint says, creates the key's Component next to it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InterruptedCreateOfANewKeyDoesNotRecreateAnUnmanagedComponentWithALongerList(bool reload)
+    {
+        const string extra = """,{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}}""";
+        var name = "new-key-unmanaged-longer-" + reload;
+        var (client, service, state, _) = await ApplyFourMaterialsAsync(name);
+        var withExtra = ShrinkDocument(name, 4, extraComponents: extra);
+        client.FailOnWrite = 1;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(withExtra, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        await client.AddComponentAsync(Rubble(client).Id, "Test.Renderer", new Dictionary<string, string>
+        {
+            ["Materials"] = "[" + string.Join(",", MaterialIds(client, 4).Select(id => $"\"{id}\"")) + "]", ["Label"] = "west"
+        });
+        if (reload) client.ReloadWorld("session-reloaded");
+        var unmanagedId = RendererIds(Rubble(client))[1];
+        client.ResetWriteCounts();
+
+        var planError = await Assert.ThrowsAsync<RLoopException>(() => service.PlanApplyAsync(withExtra, new ApplyOptions(state)));
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(withExtra, new ApplyOptions(state)));
+
+        Assert.Equal("STABLE_COMPONENT_AMBIGUOUS", planError.Code);
+        Assert.Equal("STABLE_COMPONENT_AMBIGUOUS", error.Code);
+        Assert.Equal(0, client.Writes);
+        var context = JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(error.Context))!;
+        Assert.Equal([unmanagedId], context["candidateIds"]!.AsArray().Select(id => id!.GetValue<string>()));
+        Assert.Equal("extra", context["componentKey"]!.GetValue<string>());
+        Assert.Contains(error.Suggestions, suggestion => suggestion.Contains("remove this key from the state file"));
+        AssertUnmanagedUnchanged();
+
+        var saved = JsonNode.Parse(File.ReadAllText(state))!;
+        saved["components"]!.AsObject().Remove("extra");
+        File.WriteAllText(state, saved.ToJsonString());
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
+
+        var created = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" &&
+            component.Members["Label"].Value!.GetValue<string>() == "east");
+        Assert.Equal([MaterialIds(client, 4)[3]], MaterialTargets(created));
+        Assert.Equal(created.Id, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        AssertUnmanagedUnchanged();
+        client.ResetWriteCounts();
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+
+        void AssertUnmanagedUnchanged()
+        {
+            var component = Assert.Single(Rubble(client).Components, component => component.Id == unmanagedId);
+            Assert.Equal("west", component.Members["Label"].Value!.GetValue<string>());
+            Assert.Equal(MaterialIds(client, 4), MaterialTargets(component));
+        }
+    }
+
     // A key whose create was interrupted may move before the re-run. The Component another key holds on the old Slot is not
     // the one to move, so the Component is created on the new Slot.
     [Fact]
@@ -599,6 +656,65 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
         Assert.Equal([.. siblingIds, renderer.Id], RendererIds(Rubble(client)));
         Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        for (var i = 0; i < siblingCount; i++)
+        {
+            Assert.Equal(siblingIds[i], StateComponent(state, siblingKeys[i].Item1)["id"]!.GetValue<string>());
+            Assert.Equal(4, MaterialTargets(Rubble(client).Components.Single(component => component.Id == siblingIds[i])).Length);
+        }
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // A key processed before the recreate can stop the apply before the recreate saves supersededId. Until then the siblings
+    // keep their indexes in the layout the Slot still has, so after a world reload they bind where they are and the re-run
+    // converges instead of stopping on an ownership conflict. A sibling declared first can still sit after the recreated key.
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(false, 2)]
+    [InlineData(true, 1)]
+    public async Task ApplyStoppedBeforeARecreateIsSavedConvergesAfterWorldReload(bool siblingDeclaredFirst, int siblingCount)
+    {
+        var siblingKeys = new[] { ("sibling", "south"), ("sibling2", "east") }.Take(siblingCount).ToArray();
+        var siblings = siblingKeys.Select(sibling =>
+            $$$"""{"key":"{{{sibling.Item1}}}","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"{{{sibling.Item2}}}"}}""").ToArray();
+        var leading = string.Concat(siblings.Select(sibling => sibling + ","));
+        var trailing = string.Concat(siblings.Select(sibling => "," + sibling));
+        const string marker = """{"key":"marker","type":"Test.Material","fields":{"Tint":9}},""";
+        var name = $"shrink-reload-before-recreate-{siblingDeclaredFirst}-{siblingCount}";
+        FakeResoniteClient client;
+        WorldService service;
+        string state;
+        ApplyDocument three;
+        if (siblingDeclaredFirst)
+        {
+            // The sibling is added by a later apply, so it sits after the renderer on the Slot.
+            (client, service, state, _) = await ApplyFourMaterialsAsync(name);
+            await service.ApplyAsync(ShrinkDocument(name, 4, leadingComponents: leading), new ApplyOptions(state));
+            three = ShrinkDocument(name, 3, leadingComponents: leading + marker);
+        }
+        else
+        {
+            (client, service, state, _) = await ApplyFourMaterialsAsync(name, extraComponents: trailing);
+            three = ShrinkDocument(name, 3, extraComponents: trailing, leadingComponents: marker);
+        }
+        client.ResetWriteCounts();
+        client.FailOnWrite = 1;
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ReloadWorld("session-reloaded");
+        var siblingIds = siblingKeys.Select(sibling => Assert.Single(Rubble(client).Components, component =>
+            component.Type == "Test.Renderer" && component.Members["Label"].Value!.GetValue<string>() == sibling.Item2).Id).ToArray();
+        client.ResetWriteCounts();
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([.. siblingIds, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
         for (var i = 0; i < siblingCount; i++)
         {
             Assert.Equal(siblingIds[i], StateComponent(state, siblingKeys[i].Item1)["id"]!.GetValue<string>());
