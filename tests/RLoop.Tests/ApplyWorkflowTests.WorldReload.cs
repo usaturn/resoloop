@@ -64,6 +64,37 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    // Moving a Component off a Slot or pruning it shifts the same-type ones after it, so the keys that stay are saved at their
+    // new indexes and a world reload binds them where they are instead of stopping on an ambiguity.
+    [Theory]
+    [InlineData("move")]
+    [InlineData("prune")]
+    public async Task ComponentRemovedFromASlotLeavesIndexesAWorldReloadBinds(string removal)
+    {
+        var name = "reload-remove-" + removal;
+        var renderer = RendererSpec("renderer", "north", 4);
+        var doomed = RendererSpec("doomed", "west", 1);
+        var sibling = RendererSpec("sibling", "south", 4);
+        var document = RubbleDocument(name, [renderer, doomed, sibling]);
+        var client = new FakeResoniteClient(document);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(document, new ApplyOptions(state));
+        var removed = removal == "move" ? RubbleDocument(name, [renderer, sibling], [doomed]) : RubbleDocument(name, [renderer, sibling]);
+        var prune = removal == "prune";
+
+        await service.ApplyAsync(removed, new ApplyOptions(state, Prune: prune, ConfirmDeletes: prune));
+
+        AssertSavedIndexesMatchRubble(client, state, "renderer", "sibling");
+        client.ReloadWorld("session-reloaded");
+        string[] ids = [LabeledRenderer(client, "north").Id, LabeledRenderer(client, "south").Id];
+        client.ResetWriteCounts();
+        await service.ApplyAsync(removed, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(ids[0], StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Equal(ids[1], StateComponent(state, "sibling")["id"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task DistinctSlotsOnTheSameManagedPathStayAmbiguousAfterWorldReload()
     {

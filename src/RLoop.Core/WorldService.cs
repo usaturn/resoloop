@@ -534,6 +534,23 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                         : ["The runtime sizes this list itself (for example from the mesh's submesh count). Declare as many elements as the runtime keeps, or change the source asset first."]);
             }
 
+            // Removing a Component shifts the ones after it on its Slot, and a world reload binds keys by their saved indexes.
+            // After each removal the keys declared on that Slot are saved at their indexes in the layout left once the removals so
+            // far and the Slot's pending recreates are done; the checkpoint that follows the removal keeps them.
+            var removedIds = new HashSet<string>(StringComparer.Ordinal);
+            void SaveIndexesAfterRemoving(string id)
+            {
+                removedIds.Add(id);
+                if (prepared.Nodes.FirstOrDefault(node => node.Existing?.Components.Any(component => component.Id == id) == true) is not { } node) return;
+                var group = prepared.Components.Where(component => component.Node == node).ToArray();
+                var removed = group.Where(component => component.Superseded is not null).Select(component => component.Superseded!.Id)
+                    .Concat(removedIds).ToHashSet(StringComparer.Ordinal);
+                AssignComponentIndexes(node, group, removed, component => component.Existing?.Id);
+                foreach (var component in group)
+                    if (prepared.State.Components.TryGetValue(component.StableKey, out var saved) && saved.SlotKey == node.StableKey)
+                        prepared.State.Components[component.StableKey] = saved with { ComponentIndex = component.ComponentIndex };
+            }
+
             foreach (var component in prepared.Components)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -557,6 +574,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 {
                     await client.RemoveComponentAsync(component.RelocationSource.Id, cancellationToken);
                     counts.ComponentsDeleted++;
+                    SaveIndexesAfterRemoving(component.RelocationSource.Id);
                     component.RelocationSource = null;
                 }
                 prepared.State.Components[component.StableKey] = CreateComponentState(component, component.Id!, fields);
@@ -573,6 +591,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 cancellationToken.ThrowIfCancellationRequested();
                 await client.RemoveComponentAsync(component.Superseded!.Id, cancellationToken);
                 counts.ComponentsDeleted++;
+                SaveIndexesAfterRemoving(component.Superseded.Id);
                 component.Superseded = null;
                 prepared.State.Components[component.StableKey] = prepared.State.Components[component.StableKey] with { SupersededId = null };
                 Checkpoint(prepared);
@@ -598,6 +617,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     await client.RemoveComponentAsync(deletion.Id, cancellationToken);
+                    SaveIndexesAfterRemoving(deletion.Id);
                     // The Component an interrupted recreate replaced goes first; the key keeps tracking the replacement.
                     if (prepared.State.Components.TryGetValue(deletion.Key, out var pruned) && pruned.SupersededId == deletion.Id)
                         prepared.State.Components[deletion.Key] = pruned with { SupersededId = null };
@@ -1136,7 +1156,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             }
         }
 
-        // A recreate removes the replaced Component and appends its replacement, so record the final Slot layout.
+        // A recreate removes the replaced Component and appends its replacement, so record the layout the Slot's recreates leave.
+        // Apply saves the indexes again whenever it removes another Component from the Slot.
         foreach (var group in prepared.Components.GroupBy(component => component.Node).Where(group => group.Any(component => component.Superseded is not null)))
             AssignComponentIndexes(group.Key, group, group.Where(component => component.Superseded is not null)
                 .Select(component => component.Superseded!.Id).ToHashSet(StringComparer.Ordinal), component => component.Existing?.Id);

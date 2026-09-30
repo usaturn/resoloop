@@ -1303,4 +1303,107 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(renderers, RendererIds(Rubble(client)));
         Assert.Equal(stateHash, SHA256.HashData(File.ReadAllBytes(state)));
     }
+
+    // Rubble with the given Components and, when any are given, a Debris child Slot holding debrisComponents.
+    private ApplyDocument RubbleDocument(string name, IEnumerable<string> rubbleComponents, IEnumerable<string>? debrisComponents = null)
+    {
+        var materialComponents = string.Join(",", Enumerable.Range(1, 4).Select(i =>
+            $$"""{"key":"m{{i}}","type":"Test.Material","fields":{"Tint":{{i}} } }"""));
+        var debris = debrisComponents?.ToArray() ?? [];
+        var children = debris.Length == 0 ? "" :
+            $$""","children":[{"slot":{"key":"debris","name":"Debris"},"components":[{{string.Join(",", debris)}}]}]""";
+        return ReloadDocument(name, $$"""
+            {"schemaVersion":"1","ownership":{"key":"{{name}}"},"slot":{"key":"root","name":"Plaza","parent":"Root"},
+             "components":[{{materialComponents}}],
+             "children":[{"slot":{"key":"rubble","name":"Rubble"},"components":[{{string.Join(",", rubbleComponents)}}]{{children}} }]}
+            """);
+    }
+
+    private static string RendererSpec(string key, string label, int materials) =>
+        $$$"""{"key":"{{{key}}}","type":"Test.Renderer","fields":{"Materials":[{{{string.Join(",", Enumerable.Range(1, materials).Select(i => $"\"$ref:m{i}\""))}}}],"Label":"{{{label}}}"}}""";
+
+    // A world reload binds keys by their saved indexes, so each must be the key's actual index on Rubble.
+    private static void AssertSavedIndexesMatchRubble(FakeResoniteClient client, string state, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var id = StateComponent(state, key)["id"]!.GetValue<string>();
+            Assert.Equal(Rubble(client).Components.FindIndex(component => component.Id == id),
+                StateComponent(state, key)["componentIndex"]!.GetValue<int>());
+        }
+    }
+
+    // A move or a prune in the same apply takes another Component off the Slot a recreate is on. The keys that stay are saved
+    // at their indexes without it, wherever it sat, so a world reload binds them where they are instead of stopping on an
+    // ambiguity that no re-run can clear.
+    [Theory]
+    [InlineData("move", false)]
+    [InlineData("move", true)]
+    [InlineData("prune", false)]
+    [InlineData("prune", true)]
+    public async Task ComponentRemovedFromARecreatingSlotLeavesIndexesAWorldReloadBinds(string removal, bool removedLast)
+    {
+        var name = $"shrink-remove-{removal}-{removedLast}";
+        var sibling = RendererSpec("sibling", "south", 4);
+        var doomed = RendererSpec("doomed", "west", 1);
+        string[] RubbleComponents(int materials, bool withDoomed)
+        {
+            var renderer = RendererSpec("renderer", "north", materials);
+            var components = removedLast ? new List<string> { renderer, sibling, doomed } : [renderer, doomed, sibling];
+            if (!withDoomed) components.Remove(doomed);
+            return [.. components];
+        }
+        var four = RubbleDocument(name, RubbleComponents(4, withDoomed: true));
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        var three = removal == "move"
+            ? RubbleDocument(name, RubbleComponents(3, withDoomed: false), [doomed])
+            : RubbleDocument(name, RubbleComponents(3, withDoomed: false));
+        var prune = removal == "prune";
+
+        await service.ApplyAsync(three, new ApplyOptions(state, Prune: prune, ConfirmDeletes: prune));
+
+        AssertSavedIndexesMatchRubble(client, state, "renderer", "sibling");
+        client.ReloadWorld("session-reloaded");
+        var siblingId = LabeledRenderer(client, "south").Id;
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+    }
+
+    // Moving a key whose recreate was interrupted takes both the replacement and the replaced Component off its old Slot, so
+    // the same-type siblings left there are saved at their indexes without either and a world reload binds them where they are.
+    [Fact]
+    public async Task MovingAKeyWhoseRecreateWasInterruptedLeavesSiblingIndexesAWorldReloadBinds()
+    {
+        const string name = "shrink-move-siblings";
+        string[] siblings = [RendererSpec("sibling", "south", 4), RendererSpec("sibling2", "east", 4)];
+        var four = RubbleDocument(name, [RendererSpec("renderer", "north", 4), .. siblings]);
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        client.ResetWriteCounts();
+        await InterruptBeforeRemovingReplacedAsync(client, service, RubbleDocument(name, [RendererSpec("renderer", "north", 3), .. siblings]), state);
+        var moved = RubbleDocument(name, siblings, [RendererSpec("renderer", "north", 3)]);
+
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+
+        Assert.Equal(2, RendererIds(Rubble(client)).Length);
+        AssertSavedIndexesMatchRubble(client, state, "sibling", "sibling2");
+        client.ReloadWorld("session-reloaded");
+        string[] siblingIds = [LabeledRenderer(client, "south").Id, LabeledRenderer(client, "east").Id];
+        client.ResetWriteCounts();
+        await service.ApplyAsync(moved, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+        Assert.Equal(siblingIds, RendererIds(Rubble(client)));
+        Assert.Equal(siblingIds[0], StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        Assert.Equal(siblingIds[1], StateComponent(state, "sibling2")["id"]!.GetValue<string>());
+    }
 }
