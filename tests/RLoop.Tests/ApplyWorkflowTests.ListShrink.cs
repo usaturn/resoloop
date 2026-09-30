@@ -1344,6 +1344,44 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    // A replacement that references itself or another replacement is created without its fields, so its create checkpoint
+    // must not save those references as evidence it does not have yet. If the create response is lost, the re-run then binds
+    // the Component it created instead of creating another one and leaving the first unmanaged.
+    [Theory]
+    [InlineData("self")]
+    [InlineData("mutual")]
+    public async Task ResumedRecreateCreatedWithoutItsReferencesBindsWhatItCreated(string references)
+    {
+        var name = "shrink-lost-references-" + references;
+        string[] Components(int materials) => references == "self"
+            ? [TargetingRendererSpec("renderer", "north", materials, "$ref:renderer")]
+            : [TargetingRendererSpec("renderer", "north", materials, "$ref:second"), TargetingRendererSpec("second", "south", materials, "$ref:renderer")];
+        var four = RubbleDocument(name, Components(4));
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        var before = RendererIds(Rubble(client));
+        var three = RubbleDocument(name, Components(3));
+        client.LoseNextComponentCreateResponse = true;
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
+        var created = Assert.Single(RendererIds(Rubble(client)), id => !before.Contains(id));
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var tracked = JsonNode.Parse(File.ReadAllText(state))!["components"]!.AsObject()
+            .Select(pair => pair.Value!["id"]!.GetValue<string>()).ToHashSet();
+        Assert.Equal(Components(3).Length, RendererIds(Rubble(client)).Length);
+        Assert.All(RendererIds(Rubble(client)), id => Assert.Contains(id, tracked));
+        var renderer = Renderer(client);
+        Assert.Equal(created, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal(references == "self" ? renderer.Id : LabeledRenderer(client, "south").Id, renderer.Members["Target"].TargetId);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

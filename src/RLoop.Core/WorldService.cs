@@ -2098,9 +2098,13 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 else if (component.Existing?.Members?.TryGetValue(name, out var current) == true) identityValues[name] = MemberRaw(current);
             }
         }
+        // Until its fields are written, a Component this apply creates has only the references its create wrote. Matching it by
+        // one it does not have yet would miss it after a lost create response, and the re-run would create another.
+        var written = component.Existing is null && resolvedFields is null ? component.AppliedOnCreate ?? new Dictionary<string, string>() : null;
         var referenceSelectors = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in memberNames)
-            if (TryGetReferenceSelector(component.Spec, name, out var selector)) referenceSelectors[name] = selector;
+            if ((written is null || written.ContainsKey(name)) && TryGetReferenceSelector(component.Spec, name, out var selector))
+                referenceSelectors[name] = selector;
         return new ApplyStateComponent(id, component.Node.StableKey, component.ResolvedType ?? component.Spec.Type,
             component.TypeOrdinal, component.ComponentIndex, memberNames, identityValues,
             referenceSelectors.Count == 0 ? null : referenceSelectors, component.Superseded?.Id);
