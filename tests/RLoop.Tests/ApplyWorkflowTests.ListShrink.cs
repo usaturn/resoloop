@@ -865,11 +865,17 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, StateComponent(state, "sibling")["componentIndex"]!.GetValue<int>());
 
         using var cancellation = new CancellationTokenSource();
+        var cancelledAtSibling = false;
         var stopAtSibling = new ApplyOptions(state, Progress: progress =>
         {
-            if (progress.Stage == "components" && progress.Path?.EndsWith("/@sibling", StringComparison.Ordinal) == true) cancellation.Cancel();
+            if (progress.Stage == "components" && progress.Path?.EndsWith("/@sibling", StringComparison.Ordinal) == true)
+            {
+                cancelledAtSibling = true;
+                cancellation.Cancel();
+            }
         });
         Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, stopAtSibling, cancellation.Token)));
+        Assert.True(cancelledAtSibling);
         Assert.Equal(0, StateComponent(state, "sibling")["componentIndex"]!.GetValue<int>());
         Assert.Equal(oldId, StateComponent(state, "renderer")["supersededId"]!.GetValue<string>());
 
@@ -907,6 +913,115 @@ public sealed partial class ApplyWorkflowTests
         Assert.Null(StateComponent(state, "renderer")["supersededId"]);
         client.ResetWriteCounts();
         await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // A new key declared before a recreate is saved at its index in the layout the Slot has, past its last Component, so when
+    // its create fails before it runs the index tells none of the same-type Components apart. In the same session other keys
+    // hold all of them, and a Component another key holds is never this key's, so the re-run creates the key instead of
+    // stopping on an ambiguity.
+    [Fact]
+    public async Task InterruptedCreateOfANewKeyBeforeARecreateNextToASameTypeSiblingResumes()
+    {
+        const string extra = """{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}},""";
+        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"south"}}""";
+        const string name = "shrink-resume-failed-new-key-sibling";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name, extraComponents: sibling);
+        var siblingId = StateComponent(state, "sibling")["id"]!.GetValue<string>();
+        var three = ShrinkDocument(name, 3, extraComponents: sibling, leadingComponents: extra);
+        client.FailOnWrite = 1;
+
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Equal("", StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(Rubble(client).Components.Count, StateComponent(state, "extra")["componentIndex"]!.GetValue<int>());
+        Assert.Equal([oldId, siblingId], RendererIds(Rubble(client)));
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        var extraId = LabeledRenderer(client, "east").Id;
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([siblingId, extraId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(extraId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        Assert.Equal(4, MaterialTargets(LabeledRenderer(client, "south")).Length);
+        Assert.Equal([MaterialIds(client, 4)[3]], MaterialTargets(LabeledRenderer(client, "east")));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // The same holds for a recreate whose replacement's create fails before it runs next to two same-type siblings: without
+    // the replaced Component only the siblings are left to match, and the saved final index is past both.
+    [Fact]
+    public async Task InterruptedRecreateNextToTwoSameTypeSiblingsResumes()
+    {
+        var siblingKeys = new[] { ("sibling", "south"), ("sibling2", "west") };
+        var siblings = string.Concat(siblingKeys.Select(sibling =>
+            $$$""",{"key":"{{{sibling.Item1}}}","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"{{{sibling.Item2}}}"}}"""));
+        const string name = "shrink-resume-two-siblings";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name, extraComponents: siblings);
+        var siblingIds = siblingKeys.Select(sibling => StateComponent(state, sibling.Item1)["id"]!.GetValue<string>()).ToArray();
+        var three = ShrinkDocument(name, 3, extraComponents: siblings);
+        client.FailOnWrite = 1;
+
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Equal("", StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Equal(oldId, StateComponent(state, "renderer")["supersededId"]!.GetValue<string>());
+        Assert.Equal([oldId, .. siblingIds], RendererIds(Rubble(client)));
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([.. siblingIds, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        for (var i = 0; i < siblingKeys.Length; i++)
+        {
+            Assert.Equal(siblingIds[i], StateComponent(state, siblingKeys[i].Item1)["id"]!.GetValue<string>());
+            Assert.Equal(4, MaterialTargets(LabeledRenderer(client, siblingKeys[i].Item2)).Length);
+        }
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // And for a new key next to two managed Components of its type on a Slot without a recreate.
+    [Fact]
+    public async Task InterruptedCreateOfANewKeyNextToTwoManagedSameTypeComponentsResumes()
+    {
+        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"south"}}""";
+        const string extra = """,{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}}""";
+        const string name = "new-key-resume-two-managed";
+        var (client, service, state, rendererId) = await ApplyFourMaterialsAsync(name, extraComponents: sibling);
+        var siblingId = StateComponent(state, "sibling")["id"]!.GetValue<string>();
+        var withExtra = ShrinkDocument(name, 4, extraComponents: sibling + extra);
+        client.FailOnWrite = 1;
+
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(withExtra, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Equal("", StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal([rendererId, siblingId], RendererIds(Rubble(client)));
+
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
+
+        var extraId = LabeledRenderer(client, "east").Id;
+        Assert.Equal([rendererId, siblingId, extraId], RendererIds(Rubble(client)));
+        Assert.Equal(rendererId, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        Assert.Equal(extraId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(MaterialIds(client, 4), MaterialTargets(Renderer(client)));
+        Assert.Equal(4, MaterialTargets(LabeledRenderer(client, "south")).Length);
+        Assert.Equal([MaterialIds(client, 4)[3]], MaterialTargets(LabeledRenderer(client, "east")));
+        client.ResetWriteCounts();
+        await service.ApplyAsync(withExtra, new ApplyOptions(state));
         Assert.Equal(0, client.Writes);
     }
 

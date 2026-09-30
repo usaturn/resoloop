@@ -1235,10 +1235,10 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         excluded is null ? components : components.Where(component => component.Id != excluded.Id).ToArray();
 
     // A create interrupted before it ran saved no ID, so only type, member names and index are left to match by, and they can
-    // pick a same-type Component another key holds. Every re-run would then stop on an ownership conflict. In the same session
-    // the other keys' saved IDs are exact, so a Component they hold is never this key's match. It stays in the list, though:
-    // the saved index counts it, and leaving it out would shift the index onto another Component. Only a Component a recreate
-    // removes is left out, and only once the Slot's saved indexes count the layout without it.
+    // pick same-type Components other keys hold. Every re-run would then stop on an ownership conflict or an ambiguity. In
+    // the same session the other keys' saved IDs are exact, so a Component they hold is never this key's match. It stays in
+    // the list, though: the saved index counts it, and leaving it out would shift the index onto another Component. Only a
+    // Component a recreate removes is left out, and only once the Slot's saved indexes count the layout without it.
     private static IReadOnlySet<string>? HeldByOtherKeys(PreparedApply prepared, string key, ApplyStateComponent? state)
     {
         if (!prepared.SameSession || state?.Id is not { Length: 0 }) return null;
@@ -1932,6 +1932,10 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         }
         var matches = StableComponentCandidates(components, state?.Type ?? type, state?.ComponentIndex,
             state?.MemberNames, state?.IdentityValues, referenceTargets);
+        // A Component another key holds is never this key's, so when other keys hold every match, however many, this key's
+        // Component does not exist yet and is created. Held Components never settle an ambiguity between the others: a match
+        // no key holds can be unmanaged, so apply still stops rather than adopt it.
+        if (held is not null && matches.Length > 0 && matches.All(match => held.Contains(match.Id))) return null;
         if (matches.Length > 1 && state is not null && (state.MemberNames is not null || state.IdentityValues is not null))
             throw new RLoopException("STABLE_COMPONENT_AMBIGUOUS",
                 $"Stable Component on Slot '{state.SlotKey}' matches multiple runtime Components.", ExitCodes.ValidationFailed,
@@ -1939,8 +1943,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                     ["type"] = state.Type },
                 ["Inspect candidateIds and preserve the existing state. Adding identityFields to a manifest does not populate an older checkpoint's identity values.",
                  "Prefer named provider Slots for new content. For existing content, verify ownership and each candidate before an explicit recovery; never guess by ordinal or automatically adopt."]);
-        // A match that another key holds means this key's Component does not exist yet. Held Components never settle an ambiguity.
-        if (matches.Length == 1) return held?.Contains(matches[0].Id) == true ? null : matches[0];
+        if (matches.Length == 1) return matches[0];
         if (state is not null && (state.MemberNames is not null || state.IdentityValues is not null)) return null;
         matches = components.Where(x => TypeNamesEquivalent(x.Type, state?.Type ?? type)).ToArray();
         var requestedOrdinal = state?.TypeOrdinal ?? ordinal;
