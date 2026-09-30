@@ -198,6 +198,57 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(stateHash, SHA256.HashData(File.ReadAllBytes(state)));
     }
 
+    // A partial syncObject declaration writes only its declared children, so a reference in a child it leaves out would keep
+    // pointing at the removed Component. Only a reference whose own child carries a declared selector is re-pointed, however
+    // many other children of the member do.
+    [Theory]
+    [InlineData("undeclared-child")]
+    [InlineData("declared-child")]
+    [InlineData("no-reference")]
+    public async Task ListShrinkChecksEachNestedReferenceAgainstItsOwnDeclaredChild(string variant)
+    {
+        var name = "shrink-nested-" + variant;
+        var snapPositions = variant == "declared-child"
+            ? """{"LocalSpace":"$slot:root","Target":"$ref:renderer"}""" : """{"LocalSpace":"$slot:root"}""";
+        var consumerSpec = $$"""{"key":"consumer","type":"Test.Slider","fields":{"SnapPositions":{{snapPositions}} } }""";
+        var four = RubbleDocument(name, [RendererSpec("renderer", "north", 4), consumerSpec]);
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        var oldId = Renderer(client).Id;
+        var consumer = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Slider");
+        var children = new Dictionary<string, MemberValue>
+        {
+            ["LocalSpace"] = new("reference", consumer.Id + ":SnapPositions.LocalSpace",
+                TargetId: client.Root.Children.Single(slot => slot.Name == "Plaza").Id),
+            ["Offset"] = new("field", consumer.Id + ":SnapPositions.Offset", "int", JsonValue.Create(1))
+        };
+        if (variant != "no-reference") children["Target"] = new("reference", consumer.Id + ":SnapPositions.Target", TargetId: oldId);
+        consumer.Members["SnapPositions"] = new("syncObject", consumer.Id + ":SnapPositions", Members: children);
+        client.ResetWriteCounts();
+        var three = RubbleDocument(name, [RendererSpec("renderer", "north", 3), consumerSpec]);
+
+        if (variant == "undeclared-child")
+        {
+            var planError = await Assert.ThrowsAsync<RLoopException>(() => service.PlanApplyAsync(three, new ApplyOptions(state)));
+            var applyError = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+            Assert.Equal("APPLY_LIST_SHRINK_REFERENCED", planError.Code);
+            Assert.Equal("APPLY_LIST_SHRINK_REFERENCED", applyError.Code);
+            Assert.Contains(consumer.Id, System.Text.Json.JsonSerializer.Serialize(applyError.Context));
+            Assert.Equal(0, client.Writes);
+            Assert.Equal(oldId, Renderer(client).Id);
+            Assert.Equal(oldId, consumer.Members["SnapPositions"].Members!["Target"].TargetId);
+            return;
+        }
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        var renderer = Renderer(client);
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        if (variant == "declared-child")
+            Assert.Contains(renderer.Id, consumer.Members["SnapPositions"].Value!.ToJsonString());
+    }
+
     [Fact]
     public async Task ListShrinkRepointsManagedReferencesToTheRecreatedComponent()
     {

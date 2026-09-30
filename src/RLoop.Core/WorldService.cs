@@ -1379,10 +1379,25 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             targets[component.Superseded!.Id] = component;
             foreach (var member in component.Superseded.Members?.Values ?? []) CollectIds(member, component);
         }
-        IEnumerable<string> ReferenceTargets(MemberValue member) =>
-            (member.Kind == "reference" && member.TargetId is { } target ? [target] : Enumerable.Empty<string>())
-                .Concat((member.Members?.Values ?? []).SelectMany(ReferenceTargets))
-                .Concat((member.Elements ?? []).SelectMany(ReferenceTargets));
+        // Apply re-points a reference only where the declaration puts a selector at the same path: a partial syncObject
+        // declaration writes only its declared children, so a child it leaves out keeps pointing at the replaced Component.
+        IEnumerable<(string Target, bool Repointed)> References(MemberValue member, JsonElement? declared)
+        {
+            if (member.Kind == "reference" && member.TargetId is { } target)
+                yield return (target, declared is { } value && ContainsWorldReference(value));
+            foreach (var (name, child) in member.Members ?? new Dictionary<string, MemberValue>())
+            {
+                JsonElement? declaredChild = declared is { ValueKind: JsonValueKind.Object } parent &&
+                    parent.TryGetProperty(name, out var property) ? property : null;
+                foreach (var reference in References(child, declaredChild)) yield return reference;
+            }
+            var elements = member.Elements ?? [];
+            for (var i = 0; i < elements.Count; i++)
+            {
+                JsonElement? declaredElement = declared is { ValueKind: JsonValueKind.Array } array && i < array.GetArrayLength() ? array[i] : null;
+                foreach (var reference in References(elements[i], declaredElement)) yield return reference;
+            }
+        }
         var removed = recreates.Select(component => component.Superseded!.Id)
             .Concat(prepared.Components.Where(component => component.RelocationSource is not null).Select(component => component.RelocationSource!.Id))
             .ToHashSet(StringComparer.Ordinal);
@@ -1391,14 +1406,14 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         var violations = new List<object>();
         void Check(SlotInfo slot, string ownerId, string ownerType, IReadOnlyDictionary<string, MemberValue>? members)
         {
+            var declaredFields = managed.TryGetValue(ownerId, out var owner) ? owner.Spec.Fields : null;
             foreach (var (name, member) in members ?? new Dictionary<string, MemberValue>())
-                foreach (var target in ReferenceTargets(member).Where(targets.ContainsKey))
-                {
-                    if (managed.TryGetValue(ownerId, out var owner) && owner.Spec.Fields?.TryGetValue(name, out var declared) == true &&
-                        ContainsWorldReference(declared)) continue;
+            {
+                JsonElement? declared = declaredFields?.TryGetValue(name, out var field) == true ? field : null;
+                foreach (var (target, _) in References(member, declared).Where(reference => !reference.Repointed && targets.ContainsKey(reference.Target)))
                     violations.Add(new { componentKey = targets[target].StableKey, targetId = target, referencedBy = ownerId,
                         type = ownerType, member = name, slotId = slot.Id, slotPath = slot.Path });
-                }
+            }
         }
         foreach (var slot in prepared.SnapshotSlots)
         {
