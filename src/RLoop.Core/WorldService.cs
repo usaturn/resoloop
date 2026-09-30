@@ -450,17 +450,21 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 .ToDictionary(x => x.Spec.Key!, x => x, StringComparer.Ordinal);
             var slotsByKey = prepared.Nodes.ToDictionary(x => x.StableKey, StringComparer.Ordinal);
             // A world reload binds keys by their saved indexes. Until a recreate saves supersededId the Slot keeps the replaced
-            // Component and state keeps its ID, so the bound Components on a recreating Slot are saved at their current indexes.
-            // The checkpoint that saves the Slot's first supersededId saves them all at their final indexes, as the recreate's
-            // create can stop the apply before the keys declared after it are saved again: removing the replaced Component by
-            // hand, as the reload hint says, then leaves the layout their saved indexes describe.
+            // Component and state keeps its ID, so the Components on a recreating Slot, new ones included, are saved at their
+            // current indexes. The checkpoint that saves the Slot's first supersededId saves every key on it, including ones
+            // created earlier in this apply, at its final index, as the recreate's create can stop the apply before the keys
+            // declared after it are saved again: removing the replaced Component by hand, as the reload hint says, then leaves
+            // the layout their saved indexes describe.
             var recreatingNodes = prepared.Components.Where(component => component.Superseded is not null).Select(component => component.Node).ToHashSet();
+            // Until the Slot's first supersededId is saved, a Component is saved at its index in the layout the Slot has.
+            ApplyStateComponent AtSavedLayout(ComponentRuntime component, ApplyStateComponent state) =>
+                recreatingNodes.Contains(component.Node) ? state with { ComponentIndex = component.CurrentIndex } : state;
             foreach (var component in prepared.Components)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (component.Superseded is not null && recreatingNodes.Remove(component.Node))
-                    foreach (var bound in prepared.Components.Where(bound => bound.Existing is not null && bound.Node == component.Node))
-                        if (prepared.State.Components.TryGetValue(bound.StableKey, out var saved))
+                    foreach (var bound in prepared.Components.Where(bound => bound.Node == component.Node))
+                        if (prepared.State.Components.TryGetValue(bound.StableKey, out var saved) && saved.SlotKey == component.Node.StableKey)
                             prepared.State.Components[bound.StableKey] = saved with { ComponentIndex = bound.ComponentIndex };
                 if (component.Existing is not null)
                 {
@@ -476,7 +480,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                         initialFields = await ResolveFieldsAsync(createFields, byKey, slotsByKey, assetUrls, cancellationToken);
                         component.AppliedOnCreate = initialFields;
                     }
-                    prepared.State.Components[component.StableKey] = CreateComponentState(component, string.Empty);
+                    prepared.State.Components[component.StableKey] = AtSavedLayout(component, CreateComponentState(component, string.Empty));
                     Checkpoint(prepared);
                     var created = await client.AddComponentAsync(component.Node.Id!, component.Spec.Type, initialFields, cancellationToken);
                     component.Id = created.Id;
@@ -484,10 +488,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                     counts.ComponentsAdded++;
                 }
                 if (!string.IsNullOrWhiteSpace(component.Spec.Key) && !component.VerifiesRecreate) byKey[component.Spec.Key!] = component;
-                prepared.State.Components[component.StableKey] = CreateComponentState(component, component.Id!);
-                if (component.Existing is not null && recreatingNodes.Contains(component.Node))
-                    prepared.State.Components[component.StableKey] = prepared.State.Components[component.StableKey] with
-                        { ComponentIndex = component.Node.Existing!.Components.ToList().FindIndex(candidate => candidate.Id == component.Existing.Id) };
+                prepared.State.Components[component.StableKey] = AtSavedLayout(component, CreateComponentState(component, component.Id!));
                 Checkpoint(prepared);
                 completed++;
                 options.Progress?.Invoke(new ApplyProgress("components", completed, total, component.Path,
@@ -1075,6 +1076,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         foreach (var node in prepared.Nodes)
         {
             var recreatedOnNode = RecreatedOnNode(prepared, node);
+            node.SavedFinalIndexes = prepared.State.Components.Values
+                .Any(state => state.SlotKey == node.StableKey && state.SupersededId is { Length: > 0 });
             foreach (var (spec, normalizedType, ordinal, stableKey) in ComponentKeys(node))
             {
                 prepared.State.Components.TryGetValue(stableKey, out var stateComponent);
@@ -1098,10 +1101,11 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 // In the same session the saved ID still finds the replaced Component, wherever an interrupted move left it.
                 var superseded = prepared.SameSession && stateComponent?.SupersededId is { Length: > 0 } supersededId
                     ? FindSnapshotComponent(prepared, supersededId) : null;
-                // A key without a saved ID was saved at its index in the layout this Slot's recreates leave, so match it there.
+                // A key without a saved ID was saved at its index in the layout the Slot had until a recreate saved supersededId
+                // on it, and in the layout this Slot's recreates leave after that, so match it in the same layout.
                 var held = HeldByOtherKeys(prepared, stableKey, stateComponent);
                 var candidates = Without(node.Existing?.Components ?? [], superseded);
-                if (held is not null) candidates = candidates.Where(component => !recreatedOnNode.Contains(component.Id)).ToArray();
+                if (held is not null && node.SavedFinalIndexes) candidates = candidates.Where(component => !recreatedOnNode.Contains(component.Id)).ToArray();
                 var existing = relocating || newManagedComponent ? null :
                     MatchComponent(candidates, spec.Type, ordinal, stateComponent, prepared.SameSession, topologyTargets, held);
                 string? recreateReason = null;
@@ -1232,7 +1236,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
     // pick a same-type Component another key holds. Every re-run would then stop on an ownership conflict. In the same session
     // the other keys' saved IDs are exact, so a Component they hold is never this key's match. It stays in the list, though:
     // the saved index counts it, and leaving it out would shift the index onto another Component. Only a Component a recreate
-    // removes is left out, as the saved index counts the layout without it.
+    // removes is left out, and only once the Slot's saved indexes count the layout without it.
     private static IReadOnlySet<string>? HeldByOtherKeys(PreparedApply prepared, string key, ApplyStateComponent? state)
     {
         if (!prepared.SameSession || state?.Id is not { Length: 0 }) return null;
@@ -2319,6 +2323,9 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         public Vector3Value? RelocationPosition { get; set; }
         public QuaternionValue? RelocationRotation { get; set; }
         public Vector3Value? RelocationScale { get; set; }
+        // A checkpoint saved a recreate's supersededId on this Slot before this apply, so its keys are saved at their
+        // indexes in the layout the recreates leave.
+        public bool SavedFinalIndexes { get; set; }
     }
 
     private sealed class ComponentRuntime(ApplyComponentSpec spec, NodeRuntime node, ComponentSummary? existing,
@@ -2330,6 +2337,9 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         public string StableKey { get; } = stableKey;
         public int TypeOrdinal { get; } = typeOrdinal;
         public int ComponentIndex { get; set; } = componentIndex;
+        // The index in the layout the Slot has until its recreates save supersededId, counting the Components this apply
+        // creates on it before this one. ComponentIndex holds the index in the layout the recreates leave.
+        public int CurrentIndex { get; } = componentIndex;
         public string Path { get; } = path;
         public string? Id { get; set; }
         public string? ResolvedType { get; set; }

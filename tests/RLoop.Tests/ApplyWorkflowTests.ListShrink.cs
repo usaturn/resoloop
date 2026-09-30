@@ -725,6 +725,125 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(0, client.Writes);
     }
 
+    private static FakeResoniteClient.FakeComponent LabeledRenderer(FakeResoniteClient client, string label) =>
+        Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" &&
+            component.Members["Label"].Value!.GetValue<string>() == label);
+
+    // A new key created before the Slot's recreate saves supersededId sits after the Component the recreate replaces.
+    // Until that checkpoint it is saved at its index in the layout the Slot has, so after a world reload it binds what it
+    // created and the recreate converges instead of stopping on an ownership conflict or an ambiguity.
+    [Theory]
+    [InlineData("write-failure")]
+    [InlineData("cancel")]
+    [InlineData("lost-add-response")]
+    public async Task NewKeyCreatedBeforeARecreateConvergesAfterWorldReload(string failure)
+    {
+        const string extra = """{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}},""";
+        const string marker = """{"key":"marker","type":"Test.Material","fields":{"Tint":9}},""";
+        var name = "shrink-reload-new-key-" + failure;
+        var (client, service, state, _) = await ApplyFourMaterialsAsync(name);
+        var three = ShrinkDocument(name, 3, leadingComponents: extra + (failure == "write-failure" ? marker : ""));
+        using var cancellation = new CancellationTokenSource();
+        if (failure == "write-failure") client.FailOnWrite = 2;
+        else if (failure == "cancel") { client.Cancellation = cancellation; client.CancelAfterWrites = 1; }
+        else client.LoseNextComponentCreateResponse = true;
+
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state), cancellation.Token)));
+        client.FailOnWrite = null;
+        client.CancelAfterWrites = null;
+        client.Cancellation = null;
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        var createdId = LabeledRenderer(client, "east").Id;
+        Assert.Equal(Rubble(client).Components.FindIndex(component => component.Id == createdId),
+            StateComponent(state, "extra")["componentIndex"]!.GetValue<int>());
+        client.ReloadWorld("session-reloaded");
+        var extraId = LabeledRenderer(client, "east").Id;
+        client.ResetWriteCounts();
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([extraId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(extraId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // Resuming a new key's lost create in the same session matches it in the layout its saved index describes. With a
+    // same-type sibling the index, not a single remaining candidate, has to point at the Component it created.
+    [Fact]
+    public async Task ResumedCreateOfANewKeyBeforeARecreateNextToASameTypeSiblingBindsWhatItCreated()
+    {
+        const string extra = """{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}},""";
+        const string sibling = """,{"key":"sibling","type":"Test.Renderer","fields":{"Materials":["$ref:m1","$ref:m2","$ref:m3","$ref:m4"],"Label":"south"}}""";
+        const string name = "shrink-resume-new-key-sibling";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name, extraComponents: sibling);
+        var siblingId = StateComponent(state, "sibling")["id"]!.GetValue<string>();
+        var three = ShrinkDocument(name, 3, extraComponents: sibling, leadingComponents: extra);
+        client.LoseNextComponentCreateResponse = true;
+
+        Assert.NotNull(await Record.ExceptionAsync(() => service.ApplyAsync(three, new ApplyOptions(state))));
+        var createdId = LabeledRenderer(client, "east").Id;
+        Assert.Equal(Rubble(client).Components.FindIndex(component => component.Id == createdId),
+            StateComponent(state, "extra")["componentIndex"]!.GetValue<int>());
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.NotEqual(oldId, renderer.Id);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([siblingId, createdId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(createdId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        Assert.Equal(siblingId, StateComponent(state, "sibling")["id"]!.GetValue<string>());
+        Assert.Equal(renderer.Id, StateComponent(state, "renderer")["id"]!.GetValue<string>());
+        Assert.Null(StateComponent(state, "renderer")["supersededId"]);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // Once the recreate saves the Slot's first supersededId, a new key created before it is saved at its final index in
+    // the same checkpoint, so following the reload hint leaves the layout that index describes.
+    [Fact]
+    public async Task NewKeyCreatedBeforeAnInterruptedRecreateIsSavedAtItsFinalIndex()
+    {
+        const string extra = """{"key":"extra","type":"Test.Renderer","fields":{"Materials":["$ref:m4"],"Label":"east"}},""";
+        const string name = "shrink-new-key-final-index";
+        var (client, service, state, oldId) = await ApplyFourMaterialsAsync(name);
+        var three = ShrinkDocument(name, 3, leadingComponents: extra);
+        client.FailOnWrite = 2;
+
+        await Assert.ThrowsAsync<IOException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        client.FailOnWrite = null;
+        Assert.Equal(oldId, StateComponent(state, "renderer")["supersededId"]!.GetValue<string>());
+        Assert.Equal(0, StateComponent(state, "extra")["componentIndex"]!.GetValue<int>());
+        client.ReloadWorld("session-reloaded");
+        client.ResetWriteCounts();
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(three, new ApplyOptions(state)));
+        Assert.Equal("APPLY_RECREATE_INTERRUPTED_ACROSS_SESSION", error.Code);
+        Assert.Equal(0, client.Writes);
+
+        // The replacement's ID was not saved: remove every candidate with this key's fields, then the key.
+        await client.RemoveComponentAsync(Renderer(client).Id);
+        var saved = JsonNode.Parse(File.ReadAllText(state))!;
+        saved["components"]!.AsObject().Remove("renderer");
+        File.WriteAllText(state, saved.ToJsonString());
+        var extraId = LabeledRenderer(client, "east").Id;
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        Assert.Equal(MaterialIds(client, 3), MaterialTargets(renderer));
+        Assert.Equal([extraId, renderer.Id], RendererIds(Rubble(client)));
+        Assert.Equal(extraId, StateComponent(state, "extra")["id"]!.GetValue<string>());
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     [Fact]
     public async Task RecreatedComponentAdoptsAnAssetUrlMigratedByAWorldSave()
     {
