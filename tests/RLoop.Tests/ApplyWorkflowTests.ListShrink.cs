@@ -1272,6 +1272,78 @@ public sealed partial class ApplyWorkflowTests
         Assert.Equal(oldId, created.Members["Target"].TargetId);
     }
 
+    private static string TargetingRendererSpec(string key, string label, int materials, string target) =>
+        $$$"""{"key":"{{{key}}}","type":"Test.Renderer","fields":{"Materials":[{{{string.Join(",", Enumerable.Range(1, materials).Select(i => $"\"$ref:m{i}\""))}}}],"Label":"{{{label}}}","Target":"{{{target}}}"}}""";
+
+    // Rubble's renderer, whose Target references the Renderer "second" after it on the Slot, applied with four materials each.
+    private async Task<(FakeResoniteClient Client, WorldService Service, string State)> ApplyRendererTargetingSecondAsync(string name)
+    {
+        var four = RubbleDocument(name, [TargetingRendererSpec("renderer", "north", 4, "$ref:second"), RendererSpec("second", "south", 4)]);
+        var client = new FakeResoniteClient(four);
+        var service = new WorldService(client);
+        var state = Path.Combine(_root, name + ".state.json");
+        await service.ApplyAsync(four, new ApplyOptions(state));
+        client.ResetWriteCounts();
+        return (client, service, state);
+    }
+
+    // A replacement is not referable until every replacement is verified. Otherwise the renderer's replacement, verified first,
+    // would keep the ID of the second's replacement after the runtime refills that one and the undo removes it.
+    [Fact]
+    public async Task UndoneRecreateLeavesNoOtherReplacementReferencingTheRemovedOne()
+    {
+        const string name = "shrink-refill-cross";
+        var (client, service, state) = await ApplyRendererTargetingSecondAsync(name);
+        var oldId = Renderer(client).Id;
+        var secondId = LabeledRenderer(client, "south").Id;
+        client.AfterComponentAdded = component =>
+        {
+            if (component.Type != "Test.Renderer" || component.Members["Label"].Value?.ToJsonString() != "\"south\"") return;
+            var materials = component.Members["Materials"];
+            component.Members["Materials"] = materials with
+            {
+                Elements = [.. materials.Elements!, new MemberValue("reference", component.Id + ":Materials[3]", TargetId: "null")]
+            };
+        };
+
+        var error = await Assert.ThrowsAsync<RLoopException>(() => service.ApplyAsync(RubbleDocument(name,
+            [TargetingRendererSpec("renderer", "north", 3, "$ref:second"), RendererSpec("second", "south", 3)]), new ApplyOptions(state)));
+
+        Assert.Equal("APPLY_LIST_SHRINK_NOT_CONVERGED", error.Code);
+        Assert.Equal("second", error.Context["componentKey"]);
+        var replacement = Assert.Single(Rubble(client).Components, component => component.Type == "Test.Renderer" &&
+            component.Id != oldId && component.Members["Label"].Value!.GetValue<string>() == "north");
+        Assert.NotEqual(error.Context["removedReplacementId"], replacement.Members["Target"].TargetId);
+        client.AfterComponentAdded = null;
+        var kept = RubbleDocument(name, [TargetingRendererSpec("renderer", "north", 3, "$ref:second"), RendererSpec("second", "south", 4)]);
+        await service.ApplyAsync(kept, new ApplyOptions(state));
+        Assert.Equal([secondId, replacement.Id], RendererIds(Rubble(client)));
+        Assert.Equal(secondId, replacement.Members["Target"].TargetId);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(kept, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
+    // Once every replacement is verified, a replacement's reference to another one is written with the fields.
+    [Fact]
+    public async Task RecreateReferencingAnotherRecreateTargetsItsReplacement()
+    {
+        const string name = "shrink-cross";
+        var (client, service, state) = await ApplyRendererTargetingSecondAsync(name);
+        var three = RubbleDocument(name, [TargetingRendererSpec("renderer", "north", 3, "$ref:second"), RendererSpec("second", "south", 3)]);
+
+        await service.ApplyAsync(three, new ApplyOptions(state));
+
+        var renderer = Renderer(client);
+        var second = LabeledRenderer(client, "south");
+        Assert.Equal([renderer.Id, second.Id], RendererIds(Rubble(client)));
+        Assert.Equal(second.Id, renderer.Members["Target"].TargetId);
+        Assert.Equal(3, MaterialTargets(second).Length);
+        client.ResetWriteCounts();
+        await service.ApplyAsync(three, new ApplyOptions(state));
+        Assert.Equal(0, client.Writes);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

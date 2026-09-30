@@ -444,8 +444,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                 options.Progress?.Invoke(new ApplyProgress("slots", completed, total, node.Path, $"{node.SlotAction} Slot"));
             }
 
-            // A replacement is not referable until it is verified, so a Component created before then cannot keep its ID
-            // after an undo. Such a Component is created without the reference and gets it with the fields below.
+            // A replacement is not referable until every replacement is verified, so no Component written before then, another
+            // replacement included, can keep its ID after an undo. Such a Component gets the reference with the fields below.
             var byKey = prepared.Components.Where(x => !string.IsNullOrWhiteSpace(x.Spec.Key) && x.Existing is not null && !x.VerifiesRecreate)
                 .ToDictionary(x => x.Spec.Key!, x => x, StringComparer.Ordinal);
             var slotsByKey = prepared.Nodes.ToDictionary(x => x.StableKey, StringComparer.Ordinal);
@@ -505,17 +505,19 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
 
             // Runtime logic can refill a new Component's list (for example from its asset), and then every apply would recreate it
             // again. Verify each replacement, including one an interrupted apply created, before any reference is re-pointed at it,
-            // and undo the recreate if the list is still longer.
+            // and undo the recreate if the list is still longer. A replacement created without its fields gets the ones that do
+            // not reference a replacement before it is verified, and the rest once every replacement is.
             var recreates = prepared.Components.Where(component => component.VerifiesRecreate).ToArray();
-            foreach (var component in recreates.Where(component => !string.IsNullOrWhiteSpace(component.Spec.Key)))
-                byKey[component.Spec.Key!] = component;
             foreach (var component in recreates)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (component.Existing is null && component.AppliedOnCreate is null)
                 {
-                    var createFields = await ResolveFieldsAsync(MergeCreateFields(component.Spec), byKey, slotsByKey, assetUrls, cancellationToken);
-                    await client.SetComponentMembersAsync(component.Id!, component.ResolvedType ?? component.Spec.Type, createFields, cancellationToken);
+                    var resolvable = MergeCreateFields(component.Spec).Where(field => CanResolve(field.Value, byKey, slotsByKey))
+                        .ToDictionary(StringComparer.Ordinal);
+                    var createFields = await ResolveFieldsAsync(resolvable, byKey, slotsByKey, assetUrls, cancellationToken);
+                    if (createFields.Count > 0)
+                        await client.SetComponentMembersAsync(component.Id!, component.ResolvedType ?? component.Spec.Type, createFields, cancellationToken);
                     component.AppliedOnCreate = createFields;
                 }
                 var replacement = await client.GetComponentAsync(component.Id!, cancellationToken);
@@ -539,6 +541,8 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
                         ? [$"If an interrupted apply created Component '{replacement.Id}' as the replacement, remove it in Resonite and re-run apply. Otherwise this document does not manage it, and re-running apply recreates the Component."]
                         : ["The runtime sizes this list itself (for example from the mesh's submesh count). Declare as many elements as the runtime keeps, or change the source asset first."]);
             }
+            foreach (var component in recreates.Where(component => !string.IsNullOrWhiteSpace(component.Spec.Key)))
+                byKey[component.Spec.Key!] = component;
 
             // Removing a Component shifts the ones after it on its Slot, and a world reload binds keys by their saved indexes.
             // After each removal the keys on that Slot, declared or not, are saved at their indexes in the layout left once the
