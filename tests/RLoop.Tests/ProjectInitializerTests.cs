@@ -223,6 +223,131 @@ public sealed class ProjectInitializerTests : IDisposable
         Assert.Null(migrated["skills"]);
     }
 
+    // Catch Meshy packaging gaps, check-mode writes and sync touching user-owned
+    // operation/journal/generated/editable/state files (including files in the skill tree).
+    [Fact]
+    public void MeshySyncPreservesUserDataAndCheckIsReadOnly()
+    {
+        ProjectInitializer.Initialize(_root);
+        var entry = Path.Combine(_root, ".agents/skills/meshy-resoloop/scripts/meshy.py");
+        Assert.True(File.Exists(entry), $"Expected executable entry at {entry}");
+        Assert.NotEmpty(File.ReadAllBytes(entry));
+        var retainedPaths = new[]
+        {
+            "content/generated/meshy/asset/operation.json",
+            ".resoloop/meshy-cli/operations/retained.json",
+            "content/generated/meshy/asset/source/original.glb",
+            "content/generated/meshy/asset/converted/model.blend",
+            ".resoloop/state/mesh.json",
+            ".agents/skills/meshy-resoloop/user-notes.txt"
+        };
+        foreach (var relative in retainedPaths)
+        {
+            var path = Path.Combine(_root, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, [0, 17, 255, 42]);
+        }
+        var before = SnapshotProject();
+
+        var check = BundledSkillManager.Sync(_root, update: false);
+
+        Assert.True(check.Synchronized);
+        Assert.Equal(before, SnapshotProject());
+        foreach (var file in check.Skills.Where(skill => skill.Path.StartsWith(
+                     ".agents/skills/meshy-resoloop/", StringComparison.Ordinal)))
+            Assert.NotEmpty(File.ReadAllBytes(Path.Combine(_root, file.Path)));
+
+        File.Delete(entry);
+        var missing = SnapshotProject();
+        Assert.False(BundledSkillManager.Sync(_root, update: false).Synchronized);
+        Assert.Equal(missing, SnapshotProject());
+        var updated = BundledSkillManager.Sync(_root, update: true);
+        Assert.True(updated.Synchronized);
+        Assert.Contains(".agents/skills/meshy-resoloop/scripts/meshy.py", updated.Updated);
+        Assert.Equal(before.Where(file => retainedPaths.Contains(file.Path)).ToArray(),
+            SnapshotProject().Where(file => retainedPaths.Contains(file.Path)).ToArray());
+        Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
+    }
+
+    // Catch partial restoration before conflict preflight; even lock bytes/mtime
+    // must remain unchanged until the user reconciles the edited executable.
+    [Fact]
+    public void MeshySyncRefusesEditedScriptBeforeRestoringMissingFile()
+    {
+        ProjectInitializer.Initialize(_root);
+        var edited = Path.Combine(_root, ".agents/skills/meshy-resoloop/scripts/meshy.py");
+        var missing = Path.Combine(_root, ".agents/skills/meshy-resoloop/scripts/meshy_workflow.py");
+        Assert.True(File.Exists(edited), $"Expected executable entry at {edited}");
+        Assert.True(File.Exists(missing), $"Expected sibling module at {missing}");
+        var original = File.ReadAllBytes(edited);
+        var sibling = File.ReadAllBytes(missing);
+        File.WriteAllText(edited, "user-edited executable\n");
+        File.Delete(missing);
+        var before = SnapshotProject();
+
+        foreach (var update in new[] { false, true })
+        {
+            var error = Assert.Throws<RLoopException>(() => BundledSkillManager.Sync(_root, update));
+            Assert.Equal("SKILL_SYNC_CONFLICT", error.Code);
+            Assert.Equal(before, SnapshotProject());
+        }
+
+        File.WriteAllBytes(edited, original);
+        var restored = BundledSkillManager.Sync(_root, update: true);
+        Assert.True(restored.Synchronized);
+        Assert.Equal(sibling, File.ReadAllBytes(missing));
+        Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
+    }
+
+    // Catch refusing an older project or failing to add new executable resources.
+    // Both historical schemas are supported; no lock-supplied write paths are trusted.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MeshySyncInstallsIntoPreMigrationLock(int schemaVersion)
+    {
+        ProjectInitializer.Initialize(_root);
+        var skillDirectory = Path.Combine(_root, ".agents/skills/meshy-resoloop");
+        Assert.True(Directory.Exists(skillDirectory), $"Expected skill at {skillDirectory}");
+        Directory.Delete(skillDirectory, recursive: true);
+        var lockPath = Path.Combine(_root, BundledSkillManager.LockRelativePath);
+        var installed = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(lockPath))!;
+        var oldFiles = installed["files"]!.AsObject().Where(pair => !pair.Key.StartsWith(
+                "meshy-resoloop/", StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value!.GetValue<string>());
+        File.WriteAllText(lockPath, schemaVersion == 2
+            ? System.Text.Json.JsonSerializer.Serialize(new { schemaVersion, files = oldFiles })
+            : System.Text.Json.JsonSerializer.Serialize(new
+            {
+                schemaVersion,
+                skills = oldFiles.Where(pair => pair.Key.EndsWith("/SKILL.md", StringComparison.Ordinal))
+                    .ToDictionary(pair => pair.Key[..^9], pair => pair.Value)
+            }));
+        var before = SnapshotProject();
+
+        var check = BundledSkillManager.Sync(_root, update: false);
+        Assert.False(check.Synchronized);
+        Assert.Equal(before, SnapshotProject());
+        var updated = BundledSkillManager.Sync(_root, update: true);
+
+        Assert.True(updated.Synchronized);
+        var entry = Path.Combine(skillDirectory, "scripts/meshy.py");
+        Assert.NotEmpty(File.ReadAllBytes(entry));
+        var migrated = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(lockPath))!;
+        Assert.Equal(2, migrated["schemaVersion"]!.GetValue<int>());
+        Assert.NotNull(migrated["files"]!["meshy-resoloop/scripts/meshy.py"]);
+        Assert.Null(migrated["skills"]);
+        Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
+    }
+
+    private (string Path, string? Bytes, DateTime Modified)[] SnapshotProject() =>
+        Directory.EnumerateFileSystemEntries(_root, "*", SearchOption.AllDirectories)
+            .Prepend(_root)
+            .Order(StringComparer.Ordinal)
+            .Select(path => (System.IO.Path.GetRelativePath(_root, path).Replace('\\', '/'),
+                File.Exists(path) ? Convert.ToHexString(File.ReadAllBytes(path)) : null,
+                File.GetLastWriteTimeUtc(path))).ToArray();
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);

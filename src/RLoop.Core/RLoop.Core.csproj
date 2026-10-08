@@ -4,6 +4,14 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="RLoop.Tests" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/SKILL.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.SKILL.md" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/references/runbook.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.references.runbook.md" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/references/licenses.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.references.licenses.md" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy.py" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_workflow.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_workflow.py" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_conversion.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_conversion.py" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_blender.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_blender.py" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_cli_guard.mjs" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_cli_guard.mjs" />
     <EmbeddedResource Include="../../skills/codex/resonite-uix/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-uix.SKILL.md" />
     <EmbeddedResource Include="../../skills/codex/resonite-uix/references/*.md" LogicalName="RLoop.Core.Skills.resonite-uix.references.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../skills/codex/resonite-uix/recipes/*.json" LogicalName="RLoop.Core.Skills.resonite-uix.recipes.%(Filename)%(Extension)" />
