@@ -7,6 +7,7 @@
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/SKILL.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.SKILL.md" />
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/references/runbook.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.references.runbook.md" />
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/references/licenses.md" LogicalName="RLoop.Core.Skills.meshy-resoloop.references.licenses.md" />
+    <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_doctor.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_doctor.py" />
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy.py" />
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_workflow.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_workflow.py" />
     <EmbeddedResource Include="../../skills/codex/meshy-resoloop/scripts/meshy_conversion.py" LogicalName="RLoop.Core.Skills.meshy-resoloop.scripts.meshy_conversion.py" />

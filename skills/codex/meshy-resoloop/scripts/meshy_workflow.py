@@ -16,14 +16,12 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from meshy_doctor import WorkflowError, require_cli_compatibility
+
 CLI_TIMEOUT_SECONDS = 120
 RESOURCES = ("text-to-3d", "image-to-3d")
 STATUSES = {"PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED", "CANCELED"}
 SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
-
-
-class WorkflowError(Exception):
-    """Only a wrapper-controlled error code may cross the CLI boundary."""
 
 
 def _secrets():
@@ -221,6 +219,7 @@ def _error(envelope):
 
 def child_env(project):
     key = require_key()
+    require_cli_compatibility()  # Before config/journal creation or submitting stage.
     config = _safe_tree(project, project / ".resoloop/meshy-cli")
     _mkdir(project, config / "operations/locks")
     credentials = safe_path(project, config / "env-only-no-credentials.json")
@@ -753,6 +752,13 @@ def execute(args):
             return plan(project, args)
         operation = load_operation(project, args.operation)
         _safe_tree(project, operation_dir(project, args.operation))
+        if args.command == "submit" and (
+            not args.confirm_paid or operation["task"].get("task_id")
+            or operation["stage"] != "planned"
+        ):
+            # These branches cannot send: retain single-submission recovery even
+            # when the CLI is missing/incompatible, without preparing child_env.
+            return submit(project, args.operation, operation, None, args.confirm_paid)
         env = child_env(project)
         if args.command == "submit":
             return submit(project, args.operation, operation, env, args.confirm_paid)

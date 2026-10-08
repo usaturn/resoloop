@@ -39,26 +39,108 @@ Meshy を使わない利用者に追加依存・キーは不要。init / skills 
 - offline convert: Blender と、その Python が読める NumPy、ResoLoop exporter。Meshy CLI / キー不要。`resoloop blender find/run/export` を使う。
 - ResoLoop: NuGet の最新公開版（prerelease を含む）。通常セットアップで版を固定しない。
 
-利用者による導入後、キーを外した version / help だけを確認する。login / status / list / balance / create はセットアップ確認に使わない。
+### Linux / WSL2 の手動セットアップと更新
+
+create-reso-world、Dev Container、ソース checkout は不要。以下は**利用者が導入を選んだ場合だけ**の例。導入コマンドをエージェントが自動実行しない。
+
+1. [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) を用意する。ResoLoop は公開 NuGet の最新（prerelease 含む）を利用し、通常導入で版を固定しない。既存なら update、新規なら install を選ぶ。
+2. [uv の公式導入手順](https://docs.astral.sh/uv/getting-started/installation/)で uv を導入し、Python >=3.12 を用意する。wrapper は標準ライブラリだけで動き、プロジェクトへ Python dependencies を追加しない。
+3. API を使う場合だけ [Node の公式配布](https://nodejs.org/en/download)から Node 24（最低22.12.0）を選び、npm で対応版を明示導入する。Meshy の最新版へ自動追従しない。Node/Meshy がなくても plan と convert は独立して使える。
+4. 変換を使う場合だけ [Blender の公式配布](https://www.blender.org/download/)または利用する OS のパッケージを導入する。CLI はインストールしない。複数版があれば `RESOLOOP_BLENDER_EXECUTABLE` で選ぶ。
 
 ```bash
-uv --version
-uv run --no-project python --version
-node --version
-# Meshy を使う利用者が手動で選んだ場合のみ:
-npm install --global meshy-cli@0.4.0
-env -u MESHY_API_KEY meshy --no-update-check --version
-env -u MESHY_API_KEY meshy --no-update-check --help
-# ResoLoop の更新も利用者が選んだ場合のみ:
-dotnet tool update --global ResoLoop --prerelease --allow-downgrade
+# 新規導入か既存更新の一方だけ:
+dotnet tool install --global ResoLoop --prerelease
+# dotnet tool update --global ResoLoop --prerelease --allow-downgrade
 resoloop --version
-resoloop blender find --json
+uv --version
+uv python install 3.12
+uv run --no-project --python 3.12 python --version
+# API 操作を選んだ場合だけ:
+node --version
+npm install --global meshy-cli@0.4.0
+# 新規 project の場合だけ、利用者が指定した保存先へ:
+# resoloop init "$WORLD"
+resoloop skills sync "$WORLD" --check
+# 差分・競合を確認した場合だけ:
+# resoloop skills sync "$WORLD" --update
+meshy_op doctor
 ```
 
-実測 version を作業記録へ残し、ResoLoop 更新後は help と `resoloop skills sync --check` を確認する。スキルの更新は差分を見てから行う。
-課金前にはキー・Resonite 接続を使わず、local fixture の生成・変換・export・bundle validate を実際に検証する。
-必要な検証が skipped なら、終了コード0でも事前確認は未完了で submit へ進まない。
-Blender / NumPy / exporter が不足すれば停止し、利用者が依存導入を判断する。一時的な検証環境の成功を標準環境の成功と読み替えない。
+doctor は JSON の `ok`, `checks`（安定した `name`, `ok`, `repair`）、`key_present` を返す。`ok` に応じて exit 0/1。キーは有無のみで、未設定は失敗にしない。全任意依存を診断するため、doctor が失敗しても offline plan 自体は妨げない。
+Python/OS、uv、Node/Meshy 対応版、ResoLoop/exporter、選択した Blender 内の bpy/NumPy、隣接 scripts、project を検査する。probe は10秒上限で、MESHY_* と NODE_OPTIONS 等を除いた環境を使い、子の出力はそのまま表示しない。Meshy は `--no-update-check --version` だけ。login / status / list / balance / create はセットアップ確認に使わず、設定・journal・operation を作らない。`resoloop doctor` は接続診断なので、この無認証ローカル doctor とは異なる。
+
+### Blender 内の NumPy がない場合
+
+wrapper 用 Python に NumPy を入れても Blender 内の import は直らない。Blender の Python 版・ABI をまず確認する。以下もキーなしのローカル probe で、ファイルを保存しない。
+
+```bash
+resoloop blender find --json
+# 実際に find が返した実行ファイルへ置き換える:
+BLENDER="/absolute/path/to/blender"
+"$BLENDER" --background --factory-startup --disable-autoexec --python-exit-code 1 \
+  --python-expr 'import sys, bpy; print(sys.version); print(sys.prefix); import numpy; print(numpy.__version__)'
+```
+
+NumPy が不足する OS 配布版では、同じ major/minor の Python を uv で用意し、利用者所有の隔離ディレクトリへインストールできる。標準 Blender 環境を変更しない選択肢であり、この成功は標準環境/rebuild の受入ではない。CPU/ABI が違う wheel は使わない。公式 Blender の同梱 NumPy が動くなら追加不要。
+
+```bash
+# 上の sys.version が示した値へ置き換える（wrapper の版ではない）:
+BLENDER_PYTHON_VERSION="3.14"
+uv python install "$BLENDER_PYTHON_VERSION"
+NUMPY_DIR="$WORLD/.resoloop/local-blender-numpy/$BLENDER_PYTHON_VERSION"
+uv pip install --python "$BLENDER_PYTHON_VERSION" --target "$NUMPY_DIR" numpy
+# 利用者が選んだ launcher を作る。既存ファイルは上書きしない:
+LAUNCHER="$WORLD/.resoloop/local-blender-with-numpy"
+( set -o noclobber; printf '#!/bin/bash\nexport PYTHONPATH=%q\nexec %q --python-use-system-env "$@"\n' \
+    "$NUMPY_DIR" "$BLENDER" > "$LAUNCHER" ) && chmod 700 "$LAUNCHER"
+export RESOLOOP_BLENDER_EXECUTABLE="$LAUNCHER"
+meshy_op doctor
+```
+
+これは利用者が導入を選んだときだけの手順で、doctor/init/sync は実行しない。`--python-use-system-env` は選んだ NumPy path を Blender の Python に渡すためだけに使う。NumPy 更新も同じ隔離先で利用者が選び、Blender の Python が変われば新しい版別ディレクトリへ導入する。古い blend/source/operation/journal を削除して復旧しない。
+
+### ソース checkout なしの offline 事前確認
+
+利用者が所有する適合 GLB fixture を使うか、下の小さな fixture を project 内で作る。API・画像送信・Resonite 接続なし。既存ファイルを上書きしない。実際の作品とは別の `offline-setup-fixture` を使い、この operation は API submit/attach に使わない。
+
+```bash
+mkdir -p "$WORLD/modeling"
+( set -o noclobber; printf '%s\n' \
+  'import bpy, sys' \
+  'bpy.ops.object.select_all(action="SELECT"); bpy.ops.object.delete(use_global=False)' \
+  'bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.5))' \
+  'bpy.context.object.name = "OfflineCube"' \
+  'bpy.ops.export_scene.gltf(filepath=sys.argv[-1], export_format="GLB")' \
+  > "$WORLD/modeling/offline-setup-fixture.py" )
+FIXTURE="$WORLD/modeling/offline-setup-fixture.glb"
+[ ! -e "$FIXTURE" ] && resoloop blender run "$WORLD/modeling/offline-setup-fixture.py" \
+  "--arg=$FIXTURE" --json
+uv run --no-project --python 3.12 python - "$WORLD" "$FIXTURE" <<'PYTHON'
+import hashlib, json, shutil, sys, uuid
+from pathlib import Path
+world, fixture = map(Path, sys.argv[1:])
+op = world / "content/generated/meshy/offline-setup-fixture"
+(op / "source").mkdir(parents=True, exist_ok=False)
+source = op / "source/local.glb"
+shutil.copyfile(fixture, source)
+(op / "operation.json").write_text(json.dumps({
+    "schema_version": 1, "operation_id": str(uuid.uuid4()), "kind": "image",
+    "resource": "image-to-3d", "request": {}, "stage": "downloaded",
+    "task": {"task_id": "offline-setup-fixture", "status": "SUCCEEDED"},
+    "downloads": {"state": "completed", "files": [{"key": "model.glb",
+        "path": str(source), "status": "written", "bytes": source.stat().st_size,
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}]}}))
+PYTHON
+# この synthetic fixture の culling 損失だけを利用者が了承した場合:
+meshy_op convert --operation offline-setup-fixture --height 1 --origin ground \
+  --parent 'path:["Root","VerifiedFixtureParent"]' --name OfflineFixture --allow-culling-change
+resoloop validate "$WORLD/content/generated/meshy/offline-setup-fixture/converted/bundle/model.apply.json" --json
+```
+
+parent は以前に確認した selector に置き換える。offline convert はその実在を検査しないし、この fixture をワールドへ apply しない。元 GLB、blend、conversion-report と bundle の mesh/asset 相対パスを確認する。失敗は未完了として修復し、出力を消して自動反復しない。必要な検証が skipped なら終了コード0でも submit へ進まない。
+
+実測 version と標準/隔離環境を作業記録へ残す。ResoLoop 更新後は help と skills sync --check、Blender/NumPy 更新後は doctor と fixture の**新しい出力先**で実変換・export・bundle validate を再検証する。対応 Meshy 版の変更には guard/wrapper の再検証が必要。未検証版を単に導入し直して submit しない。CLI 版違いは送信前・submitting stage 前に `cli_compatibility_*` で停止するため、送信不明と混同しない。
 
 ## キー: 利用者が zsh で非表示入力する
 

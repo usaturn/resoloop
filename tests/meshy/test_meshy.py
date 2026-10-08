@@ -33,6 +33,9 @@ if 'create' in args:
     journal = pathlib.Path(os.environ['MESHY_CONFIG_DIR']) / 'operations'
     journal.mkdir(parents=True, exist_ok=True)
     (journal / (oid + '.json')).write_text(json.dumps({'operation_id':oid, 'state':'started'}))
+if args == ['--no-update-check', '--version']:
+    print('0.4.0')
+    sys.exit(0)
 mode = os.environ.get('FAKE_MODE', '')
 if mode == 'sleep':
     time.sleep(3)
@@ -68,6 +71,9 @@ def world(tmp_path):
     fake = bin_dir / "meshy"
     fake.write_text(FAKE.replace("__PYTHON__", sys.executable))
     fake.chmod(0o755)
+    node = bin_dir / "node"
+    node.write_text(f"#!{sys.executable}\nprint('v24.0.0')\n")
+    node.chmod(0o755)
     reply = tmp_path / "reply.json"
     calls = tmp_path / "calls.jsonl"
     # An ambient credential profile must never enable keyless operations.
@@ -153,7 +159,8 @@ class Harness:
     def calls(self):
         if not self.calls_file.exists():
             return []
-        return [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+        return [call for line in self.calls_file.read_text().splitlines()
+                if "--version" not in (call := json.loads(line))["args"]]
 
     def submit(self, ok=True):
         return self.run("submit", "--operation", "asset", "--confirm-paid", ok=ok)
@@ -301,11 +308,11 @@ def test_unknown_submit_cannot_be_retried(world, mode):
     ).exists()
 
 
-def test_spawn_failure_and_stale_submitting_never_retry(world):
+def test_missing_cli_stops_before_submission_and_stale_submitting_never_retries(world):
     world.plan()
     world.env["PATH"] = "/nonexistent"
     world.submit(ok=False)
-    assert world.manifest()["stage"] == "unknown"
+    assert world.manifest()["stage"] == "planned"
     world.submit(ok=False)
     op = world.manifest()
     op["stage"] = "submitting"
@@ -966,6 +973,7 @@ NODE_FAKE = r"""#!__NODE__
 import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 const args = process.argv.slice(2);
+if (args.includes('--version')) { console.log('0.4.0'); process.exit(0); }
 writeFileSync(process.env.FAKE_CALLS, JSON.stringify({args}) + '\n', {flag: 'a'});
 const record = JSON.parse(readFileSync(process.env.FAKE_JOURNAL_RECORD, 'utf8'));
 record.operation_id = args[args.indexOf('--operation-id') + 1];

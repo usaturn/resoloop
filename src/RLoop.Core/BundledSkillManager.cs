@@ -23,7 +23,7 @@ public static class BundledSkillManager
         .Concat(["meshy-resoloop/references/runbook.md", "meshy-resoloop/references/licenses.md",
             "meshy-resoloop/scripts/meshy.py", "meshy-resoloop/scripts/meshy_workflow.py",
             "meshy-resoloop/scripts/meshy_conversion.py", "meshy-resoloop/scripts/meshy_blender.py",
-            "meshy-resoloop/scripts/meshy_cli_guard.mjs",
+            "meshy-resoloop/scripts/meshy_cli_guard.mjs", "meshy-resoloop/scripts/meshy_doctor.py",
             "resonite-model-preproduction/references/build-handoff.md",
             "resonite-uix/references/assets.md", "resonite-uix/references/layout.md",
             "resonite-uix/references/interaction-and-migration.md", "resonite-uix/references/recipes.md",

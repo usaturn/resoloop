@@ -5,10 +5,11 @@ import json
 import math
 import signal
 import sys
-from pathlib import Path
 
-from meshy_conversion import convert_operation
-from meshy_workflow import RESOURCES, WorkflowError, execute, redact
+# Keep help and platform rejection usable without fcntl or other POSIX imports.
+# Also avoid creating __pycache__ inside a deployed project during doctor/help.
+sys.dont_write_bytecode = True
+from meshy_doctor import WorkflowError, diagnose, require_supported_platform
 
 
 class Parser(argparse.ArgumentParser):
@@ -84,11 +85,12 @@ def parser():
         "list", help="Read recent tasks for manual reconciliation; never create."
     )
     listing.add_argument("--operation")
-    listing.add_argument("--resource", required=True, choices=RESOURCES)
+    listing.add_argument("--resource", required=True, choices=("text-to-3d", "image-to-3d"))
     balance = commands.add_parser(
         "balance", help="Explicit read-only API balance check."
     )
     balance.add_argument("--operation")
+    commands.add_parser("doctor", help="Read-only local dependency checks; no API calls or key required.")
     return root
 
 
@@ -98,9 +100,18 @@ def _interrupt(signum, frame):
 
 def main(argv=None):
     signal.signal(signal.SIGTERM, _interrupt)
+    redact = lambda value: value  # Pre-import errors are fixed wrapper codes only.
     try:
         args = parser().parse_args(argv)
+        require_supported_platform()
+        from pathlib import Path
+        if args.command == "doctor":
+            result = diagnose(Path(args.project))
+            print(json.dumps(result, allow_nan=False))
+            return 0 if result["ok"] else 1
+        from meshy_workflow import execute, redact
         if args.command == "convert":
+            from meshy_conversion import convert_operation
             result = convert_operation(
                 Path(args.project),
                 args.operation,

@@ -13,6 +13,28 @@ env:
   DOTNET_NOLOGO: "1"
 
 jobs:
+  linux-offline-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Python (minimum supported wrapper version)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+      - name: Setup Node (journal guard tests)
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Offline workflow and doctor safety tests
+        # No Meshy install/key, API, Blender, Resonite or integration tests.
+        # Real Blender fixtures are a separate mandatory local pack/install check;
+        # do not include them here and count dependency skips as coverage.
+        run: uv run --group dev pytest tests/meshy/test_meshy.py tests/meshy/test_meshy_doctor.py -q
+
   windows:
     runs-on: windows-latest
     timeout-minutes: 20

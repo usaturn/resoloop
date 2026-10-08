@@ -98,7 +98,17 @@ Resoniteでテレポーターガンを作って。装備できるアイテムで
 
 ## モデルの制作前工程
 
-同梱の [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) スキルは、コンセプト・モデル仕様・受入条件・制作経路を整理し、制作を実行せず `resonite-build` へ引き継ぎます。native、Blender、Meshy併用、Hybrid、既存アセットの調整を比較します。Meshyの実行には別途導入する `meshy-resoloop` と、課金・画像送信の明示許可が必要です。`init` でスキルと引き継ぎテンプレートを配布します。既存プロジェクトは `skills sync --check` の結果を確認してから `--update` で導入できます。
+同梱の [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) スキルは、コンセプト・モデル仕様・受入条件・制作経路を整理し、制作を実行せず `resonite-build` へ引き継ぎます。native、Blender、Meshy併用、Hybrid、既存アセットの調整を比較します。Meshyの実行は同梱の [meshy-resoloop](skills/codex/meshy-resoloop/SKILL.md) を使い、課金・画像送信は別途明示許可が必要です。`init` でスキルと引き継ぎテンプレートを配布します。既存プロジェクトは `skills sync --check` の結果を確認してから `--update` で導入できます。
+
+## 任意の Meshy 実行環境
+
+`init` / レビュー後の `skills sync --update` は `.agents/skills/meshy-resoloop/` に手順と隣接 scripts を配置するだけで、依存導入・キー設定・API 呼び出しを行いません。wrapper は **Linux / WSL2 の Linux 側のみ**。Windows native の init/sync と完成 bundle の validate/diff/apply は別で利用できます。Python >=3.12 と uv が必要ですが、offline plan は Node/Meshy/キー不要です。API 操作は `meshy-cli@0.4.0` / Node >=22.12.0（推奨24）、offline convert は Blender 内の bpy/NumPy と exporter が必要です。キーは環境変数だけで渡します。
+
+```bash
+uv run --no-project "$WORLD/.agents/skills/meshy-resoloop/scripts/meshy.py" --project "$WORLD" doctor
+```
+
+`WORLD` は対象プロジェクトの絶対パスです。doctor は無認証・読み取り専用のローカル診断で、キー未設定は失敗理由にしません。[導入・更新・復旧・Windows 引き継ぎ](skills/codex/meshy-resoloop/references/runbook.md)を参照してください。ResoLoop は prerelease を含む最新公開版を使い、通常導入では固定しません。ベース生成 → Blender 仕上げ → 別途承認した build/apply の責務を保ち、offline 成功を課金・実機受入の成功にしません。
 
 ## Blenderによるモデル制作
 

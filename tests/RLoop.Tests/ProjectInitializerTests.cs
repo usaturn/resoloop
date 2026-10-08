@@ -340,6 +340,26 @@ public sealed class ProjectInitializerTests : IDisposable
         Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
     }
 
+    // Catch a packaged entry whose diagnostic sibling is absent/unmanaged.
+    [Fact]
+    public void MeshyDoctorIsInstalledAndRestoredWithoutChangingUserData()
+    {
+        ProjectInitializer.Initialize(_root);
+        const string relative = ".agents/skills/meshy-resoloop/scripts/meshy_doctor.py";
+        var path = Path.Combine(_root, relative);
+        Assert.True(File.Exists(path), $"Expected diagnostic module at {path}");
+        var original = File.ReadAllBytes(path);
+        Assert.NotEmpty(original);
+        File.Delete(path);
+        var before = SnapshotProject();
+        Assert.False(BundledSkillManager.Sync(_root, false).Synchronized);
+        Assert.Equal(before, SnapshotProject());
+        var result = BundledSkillManager.Sync(_root, true);
+        Assert.Contains(relative, result.Updated);
+        Assert.Equal(original, File.ReadAllBytes(path));
+        Assert.True(BundledSkillManager.Sync(_root, false).Synchronized);
+    }
+
     private (string Path, string? Bytes, DateTime Modified)[] SnapshotProject() =>
         Directory.EnumerateFileSystemEntries(_root, "*", SearchOption.AllDirectories)
             .Prepend(_root)

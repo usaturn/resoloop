@@ -2,7 +2,7 @@
 
 Blenderが得意な形状を背景Python処理で制作し、既存のvalidate/diff/applyへ接続します。新規プロジェクトでは `resoloop init` が `resonite-blender` も配置します。既存プロジェクトでは同じビルドの `skills sync --check` で差分を確認してから `skills sync --update` を実行します。ユーザーが編集したスキルは上書きしません。
 
-仕様・受入条件・制作経路がまだ決まっていない場合は、同梱の [resonite-model-preproduction](../skills/codex/resonite-model-preproduction/SKILL.md) で制作前工程を整理します。完成したBuild Handoffは `resonite-build` が受け取り、必要に応じて `resonite-blender` へ進みます。前工程ではBlender操作や生成・ワールド変更を実行しません。Meshyを候補にしても、実行には非同梱の `meshy-resoloop` と課金・画像送信の別途明示許可が必要です。
+仕様・受入条件・制作経路がまだ決まっていない場合は、同梱の [resonite-model-preproduction](../skills/codex/resonite-model-preproduction/SKILL.md) で制作前工程を整理します。完成したBuild Handoffは `resonite-build` が受け取り、必要に応じて `resonite-blender` へ進みます。前工程ではBlender操作や生成・ワールド変更を実行しません。Meshyを候補にしても、実行は同梱の [meshy-resoloop](../skills/codex/meshy-resoloop/SKILL.md) を使い、課金・画像送信の別途明示許可が必要です。wrapper は Linux / WSL2 の Linux 側のみで、Node/Meshy CLI や Blender/NumPy は任意依存です。init/sync は導入・認証・API 呼び出しを行いません。[runbook](../skills/codex/meshy-resoloop/references/runbook.md) の無認証 doctor と手動セットアップで、Blender の Python 内の NumPy と exporter を確認します。ベース生成・復旧・変換の後、ここで個別 mesh/階層/texture と編集可能な blend を保持して仕上げ、resonite-build へ渡します。culling の損失は別途許可が必要で、透明・rig・animation 等の拒否条件は解除しません。
 
 ## 検出と実行
 
