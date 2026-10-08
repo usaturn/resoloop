@@ -102,9 +102,14 @@ Handoff approval does not authorize spending or image transmission. A shareable 
 
 - Meshy generation mode: <text-to-3D / image-to-3D; not-applicable — reason for a non-Meshy route>
 
+- **text-to-3D:** list preview and any proposed refine as separate paid operations/rows, one submission each (two total when both are proposed).
+- **image-to-3D:** list each actual proposed image-generation operation on its own row, one submission each; do not automatically add preview/refine stages.
+
+Itemize the submission count and budget ceiling for each actual proposed operation; record the total proposed submission count.
+
 | Proposed operation | Generation scope / inputs sent / destination | Submission count | Budget ceiling / currency or credits | Model | Texture / PBR / resolution | Permission evidence to recheck |
 | --- | --- | --- | --- | --- | --- | --- |
-| <operation; preview and refine counted as separate submissions> | <exact text/images/asset references; no secret contents> | <count per operation, total> | <ceiling, not inferred> | <proposed model> | <settings> | <not granted here; prior claim if supplied> |
+| <actual proposed operation for the selected mode> | <exact text/images/asset references; no secret contents> | <count per operation, total> | <ceiling, not inferred> | <proposed model> | <settings> | <not granted here; prior claim if supplied> |
 
 - Image-transmission Approval Status: <not authorized here; constraints/prior evidence to recheck>
 - Regeneration proposal: <additional paid operation; consider local refinement first>
