@@ -96,6 +96,10 @@ resoloop doctor
 Resoniteでテレポーターガンを作って。装備できるアイテムで、銃みたいな形。銃を撃つと弾が山なりに飛んでいって、当たった地点に自分がワープするようにして。
 ~~~
 
+## モデルの制作前工程
+
+同梱の [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) スキルは、コンセプト・モデル仕様・受入条件・制作経路を整理し、制作を実行せず `resonite-build` へ引き継ぎます。native、Blender、Meshy併用、Hybrid、既存アセットの調整を比較します。Meshyの実行には別途導入する `meshy-resoloop` と、課金・画像送信の明示許可が必要です。`init` でスキルと引き継ぎテンプレートを配布します。既存プロジェクトは `skills sync --check` の結果を確認してから `--update` で導入できます。
+
 ## Blenderによるモデル制作
 
 複雑なモデルの制作を依頼したときは、resoloopがBlenderを使うことがあります。

@@ -82,6 +82,10 @@ Then describe what you want to build in Resonite using ordinary language. For ex
 Create a teleporter gun in Resonite. Make it an equippable item shaped like a gun. When fired, it should launch a projectile in an arc and teleport me to the point where the projectile lands.
 ~~~
 
+## Model preproduction
+
+For concept exploration, a model brief or production-route planning, the bundled [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) skill defines specifications, acceptance criteria and a Build Handoff before modeling. It compares native, Blender, Meshy-assisted, hybrid and existing-asset routes, then hands off to `resonite-build` without executing production. Meshy execution requires the separate, non-bundled `meshy-resoloop` skill and explicit paid-operation/image-transmission permission. `init` installs the skill and its handoff template; existing projects can review `skills sync --check` before `--update`.
+
 ## Blender modeling
 
 When you ask for a complex model, resoloop may use Blender.

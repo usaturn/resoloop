@@ -204,6 +204,8 @@ applyの最終JSONはstdout、進捗はstderrへ分離されます。plan/diff�
 
 ## Blender modeling
 
+制作前の仕様・受入条件・経路選定には同梱の `resonite-model-preproduction` を使います。制作を開始せず、[Build Handoff テンプレート](skills/codex/resonite-model-preproduction/references/build-handoff.md)で `resonite-build` へ渡します。Meshyはベース生成の候補であり、実行には非同梱の `meshy-resoloop` と課金・画像送信の別途明示許可が必要です。
+
 `resoloop blender find`、`blender run SCRIPT.py`、`blender export FILE.blend`で、背景Pythonによるモデル制作からResoniteへのimportまで進められます。BlenderはPATH登録なしでも検出でき、事前に起動しておく必要はありません。同梱の`resonite-blender`スキルは造形、VR向け資源設計、静的meshのUV・法線・texture・materialのimportを扱います。未インストールの場合はユーザーの許可を確認し、CLIが勝手にインストールすることはありません。
 
 exportはレビュー可能なapply bundleを新しい出力directoryへ生成します。この時点ではrenderやworldの変更は行いません。
@@ -303,7 +305,8 @@ enumなどの非Component型はassembly名が必要な場合があります。`t
 
 skills/codexには次のworkflow Skillがあります。
 
-- resonite-build: 観測から編集・Reflection・検証・修正までの統合ループ
+- resonite-model-preproduction: 3Dアセットのコンセプト・仕様・受入条件・制作経路・構造・工程を整理し、テンプレートでbuildへ引き継ぐ前工程
+- resonite-build: 完成したBuild Handoffの受取と、観測から編集・Reflection・検証・修正までの統合ループ
 - resonite-uix: 共有Assets、Layout、入力・状態保持、UIX階層移行と見た目の検証
 - resonite-debug: read-first診断
 - resonite-inspect: コンテキストを浪費しない観測
