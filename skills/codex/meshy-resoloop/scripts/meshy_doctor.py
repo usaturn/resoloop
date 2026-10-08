@@ -39,10 +39,14 @@ def _probe(argv, *, project=None):
     try:
         child = subprocess.Popen(
             argv, env=_probe_env(), cwd=project, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        stdout, _ = child.communicate(timeout=PROBE_TIMEOUT_SECONDS)
+        stdout, stderr = child.communicate(timeout=PROBE_TIMEOUT_SECONDS)
+        # Decode once here, never during stop/reap: malformed output must not
+        # replace a failed check with a second cleanup-time UnicodeError.
+        stdout = stdout.decode("utf-8")
+        stderr.decode("utf-8")
         completed = True
         return stdout if child.returncode == 0 else None
     except (OSError, UnicodeError, subprocess.TimeoutExpired):

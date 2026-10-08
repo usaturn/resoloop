@@ -31,6 +31,8 @@ if os.environ.get('DESCENDANT_TOOL') == name:
     sys.exit(0)
 if os.environ.get('SLOW_TOOL') == name:
     time.sleep(5)
+if os.environ.get('INVALID_TOOL') == name:
+    os.write(1 if os.environ['INVALID_STREAM'] == 'stdout' else 2, b'\xff')
 if os.environ.get('BAD_TOOL') == name:
     print('unexpected output doctor_secret_sentinel_123456')
     print('doctor_secret_sentinel_123456', file=sys.stderr)
@@ -52,7 +54,9 @@ elif name == 'blender' and '--python-expr' in args:
     # Execute the actual expression, replacing only the unavailable Blender modules.
     import types
     sys.modules['bpy'] = types.ModuleType('bpy')
-    if os.environ.get('NO_NUMPY') != '1':
+    if os.environ.get('NO_NUMPY') == '1':
+        sys.modules['numpy'] = None  # Block even an importable host NumPy.
+    else:
         sys.modules['numpy'] = types.ModuleType('numpy')
     exec(expression)
 else:
@@ -156,6 +160,34 @@ def test_diagnostic_exit_reflects_dependency_failure(local, variable, value, che
     assert snapshot(local[0]) == before
 
 
+# Catch cleanup decoding invalid bytes a second time and hiding named repairs.
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+@pytest.mark.parametrize('tool,check', [('node', 'node'), ('blender', 'bpy_numpy')])
+def test_invalid_probe_output_keeps_diagnostic_checks(local, stream, tool, check):
+    local[2].update(INVALID_TOOL=tool, INVALID_STREAM=stream)
+    before = snapshot(local[0])
+    proc = invoke(local, 'doctor')
+    assert proc.returncode == 1
+    assert proc.stdout, proc.stderr
+    result = json.loads(proc.stdout)
+    failed = next(c for c in result['checks'] if c['name'] == check)
+    assert result['ok'] is False
+    assert failed['ok'] is False and failed['repair']
+    assert not proc.stderr
+    assert snapshot(local[0]) == before
+
+
+# A real/importable host NumPy must not mask the fake's missing dependency.
+def test_missing_numpy_check_cannot_use_host_numpy(local):
+    (local[1] / 'numpy.py').write_text('AVAILABLE = True\n')
+    local[2]['NO_NUMPY'] = '1'
+    proc = invoke(local, 'doctor')
+    result = json.loads(proc.stdout)
+    assert proc.returncode == 1
+    failed = next(c for c in result['checks'] if c['name'] == 'bpy_numpy')
+    assert failed['ok'] is False and failed['repair']
+
+
 @pytest.mark.parametrize('tool', ['node', 'meshy', 'uv', 'resoloop'])
 def test_missing_dependency_fails_with_named_check(local, tool):
     (local[1] / tool).unlink()
@@ -207,6 +239,26 @@ def test_incompatible_submit_never_records_or_sends_submission(local, variable, 
     proc = invoke(local, 'submit', '--operation', 'asset', '--confirm-paid')
     assert proc.returncode == 1
     assert json.loads(proc.stderr)['error']['code'].startswith('cli_compatibility_')
+    assert snapshot(local[0]) == before
+    assert not (local[0] / '.resoloop/meshy-cli').exists()
+    assert not any('create' in c['args'] for c in calls(local))
+    assert KEY not in proc.stdout + proc.stderr
+
+
+# Invalid bytes must not turn compatibility failures into local_workflow_failed.
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+@pytest.mark.parametrize('tool,code', [
+    ('node', 'cli_compatibility_node_requires_22_12_0'),
+    ('meshy', 'cli_compatibility_meshy_requires_0_4_0'),
+])
+def test_invalid_version_output_stops_submit_with_named_error(local, stream, tool, code):
+    local[2]['MESHY_API_KEY'] = KEY
+    assert invoke(local, 'plan', '--operation', 'asset', '--kind', 'text', '--prompt', 'stone').returncode == 0
+    before = snapshot(local[0])
+    local[2].update(INVALID_TOOL=tool, INVALID_STREAM=stream)
+    proc = invoke(local, 'submit', '--operation', 'asset', '--confirm-paid')
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)['error']['code'] == code
     assert snapshot(local[0]) == before
     assert not (local[0] / '.resoloop/meshy-cli').exists()
     assert not any('create' in c['args'] for c in calls(local))

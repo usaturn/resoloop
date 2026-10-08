@@ -57,11 +57,12 @@ def run_resoloop(project, args, phase):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
         )
-        stdout, _ = child.communicate(timeout=RESOLOOP_PROCESS_TIMEOUT_SECONDS)
-        envelope = json.loads(stdout)
+        stdout, stderr = child.communicate(timeout=RESOLOOP_PROCESS_TIMEOUT_SECONDS)
+        # Keep cleanup byte-only so invalid output retains the phase error.
+        stderr.decode("utf-8")
+        envelope = json.loads(stdout.decode("utf-8"))
         if (
             child.returncode != 0
             or not isinstance(envelope, dict)
