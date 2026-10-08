@@ -15,11 +15,13 @@ public static class BundledSkillManager
     public const string LockRelativePath = ".agents/skills/.resoloop-bundled.json";
 
     public static IReadOnlyList<string> Names { get; } =
-        ["resonite-build", "resonite-debug", "resonite-flux", "resonite-inspect", "resonite-blender", "resonite-uix"];
+        ["resonite-build", "resonite-debug", "resonite-flux", "resonite-inspect", "resonite-blender", "resonite-uix",
+            "resonite-model-preproduction"];
 
     // Only these packaged paths are writable. Never use paths supplied by the installed lock.
     public static IReadOnlyList<string> Files { get; } = Names.Select(name => name + "/SKILL.md")
-        .Concat(["resonite-uix/references/assets.md", "resonite-uix/references/layout.md",
+        .Concat(["resonite-model-preproduction/references/build-handoff.md",
+            "resonite-uix/references/assets.md", "resonite-uix/references/layout.md",
             "resonite-uix/references/interaction-and-migration.md", "resonite-uix/references/recipes.md",
             "resonite-uix/references/control-verification.md"])
         .Concat(UixRecipes.Catalog.Select(recipe => $"resonite-uix/recipes/{recipe.Name}.json")).ToArray();

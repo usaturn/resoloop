@@ -9,6 +9,8 @@
     <EmbeddedResource Include="../../skills/codex/resonite-uix/recipes/*.json" LogicalName="RLoop.Core.Skills.resonite-uix.recipes.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../skills/codex/resonite-blender/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-blender.SKILL.md" />
     <EmbeddedResource Include="../../skills/codex/resonite-build/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-build.SKILL.md" />
+    <EmbeddedResource Include="../../skills/codex/resonite-model-preproduction/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-model-preproduction.SKILL.md" />
+    <EmbeddedResource Include="../../skills/codex/resonite-model-preproduction/references/build-handoff.md" LogicalName="RLoop.Core.Skills.resonite-model-preproduction.references.build-handoff.md" />
     <EmbeddedResource Include="../../skills/codex/resonite-debug/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-debug.SKILL.md" />
     <EmbeddedResource Include="../../skills/codex/resonite-flux/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-flux.SKILL.md" />
     <EmbeddedResource Include="../../skills/codex/resonite-inspect/SKILL.md" LogicalName="RLoop.Core.Skills.resonite-inspect.SKILL.md" />
