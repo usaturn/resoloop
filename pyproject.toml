@@ -1,0 +1,16 @@
+[project]
+name = "resoloop-offline-tests"
+version = "0.0.0"
+description = "Optional offline tests for bundled ResoLoop tools"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/meshy"]
+addopts = "-p no:cacheprovider"
+
+[tool.uv]
+package = false

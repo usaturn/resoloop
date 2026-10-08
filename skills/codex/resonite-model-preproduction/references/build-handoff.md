@@ -113,7 +113,7 @@ Itemize the submission count and budget ceiling for each actual proposed operati
 
 - Image-transmission Approval Status: <not authorized here; constraints/prior evidence to recheck>
 - Regeneration proposal: <additional paid operation; consider local refinement first>
-- External skill availability: <meshy-resoloop present/unknown/absent; absent means installation or alternate route, no paid work>
+- Bundled workflow / optional dependency availability: <meshy-resoloop present/unknown/absent; Linux/WSL2, Python/uv, Node/Meshy CLI, Blender/NumPy/exporter checks pending; absence means reviewed skills sync, manual setup or alternate route, no paid work>
 
 ## 6. Model architecture and construction
 
@@ -156,7 +156,7 @@ Every row needs a deliverable and an exit check. These are future build steps, n
 
 - Execution owner: `resonite-build` first; consume this completed brief without repeating preproduction.
 - Native / Blender path: <build → resonite-blender as needed → native integration/verification>
-- Meshy path: <build rechecks explicit paid/transmission permissions and external meshy-resoloop → Blender finishing → native integration/verification; unavailable skill means stop paid work/report alternate route>
+- Meshy path: <build rechecks explicit paid/transmission permissions and bundled meshy-resoloop/local prerequisites → Blender finishing → native integration/verification; unavailable skill means stop paid work/report alternate route>
 - Non-goals to preserve: <scope exclusions>
 - Assumptions to recheck: <assumption, consequence and owner>
 - Open questions / blockers: <question, affected step and decision owner>

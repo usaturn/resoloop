@@ -7,6 +7,8 @@ description: Create detailed static 3D models with Blender Python for Resonite w
 
 Use Blender when the requested silhouette, organic surface, cutouts, bevels or topology would be awkward or expensive to build with Resonite procedural meshes. Prefer native meshes for simple or runtime-parametric shapes. Combine an authored mesh with native colliders, interaction and Flux where useful. Preserve the requested visual quality and scope.
 
+For a Meshy-assisted Build Handoff, use the bundled `meshy-resoloop` for approved base generation, recovery and offline conversion on Linux/WSL2, then finish here against the handoff's acceptance gates. Its doctor checks Blender's own bpy/NumPy and the exporter without authentication; see its runbook for manual optional setup. Preserve acquired GLB, individual meshes/hierarchy, textures and editable `.blend`; do not join, decimate or bake automatically. Source culling is not preserved: obtain specific permission for that loss, inspect conversion warnings, and keep transparency/transmission/rig/animation/shader rejection gates. Use new export directories for edits; pass the full bundle to `resonite-build` for separately authorized diff/apply and actual runtime/visual checks.
+
 ## Find Blender before modeling
 
 Run `resoloop blender find --json` (no Resonite connection required). It executes `--version` after discovery. Selection order is explicit configuration, PATH, standard install folders, then Windows App Paths / uninstall registry. Standard Windows discovery includes versioned folders under Program Files/Blender Foundation and per-user Programs; PATH need not contain Blender. With several versions, explicit configuration is reproducible; the standard-folder scan prefers the highest version within a root.

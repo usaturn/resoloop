@@ -16,11 +16,15 @@ public static class BundledSkillManager
 
     public static IReadOnlyList<string> Names { get; } =
         ["resonite-build", "resonite-debug", "resonite-flux", "resonite-inspect", "resonite-blender", "resonite-uix",
-            "resonite-model-preproduction"];
+            "resonite-model-preproduction", "meshy-resoloop"];
 
     // Only these packaged paths are writable. Never use paths supplied by the installed lock.
     public static IReadOnlyList<string> Files { get; } = Names.Select(name => name + "/SKILL.md")
-        .Concat(["resonite-model-preproduction/references/build-handoff.md",
+        .Concat(["meshy-resoloop/references/runbook.md", "meshy-resoloop/references/licenses.md",
+            "meshy-resoloop/scripts/meshy.py", "meshy-resoloop/scripts/meshy_workflow.py",
+            "meshy-resoloop/scripts/meshy_conversion.py", "meshy-resoloop/scripts/meshy_blender.py",
+            "meshy-resoloop/scripts/meshy_cli_guard.mjs", "meshy-resoloop/scripts/meshy_doctor.py",
+            "resonite-model-preproduction/references/build-handoff.md",
             "resonite-uix/references/assets.md", "resonite-uix/references/layout.md",
             "resonite-uix/references/interaction-and-migration.md", "resonite-uix/references/recipes.md",
             "resonite-uix/references/control-verification.md"])

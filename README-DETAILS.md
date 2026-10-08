@@ -204,7 +204,7 @@ applyの最終JSONはstdout、進捗はstderrへ分離されます。plan/diff�
 
 ## Blender modeling
 
-制作前の仕様・受入条件・経路選定には同梱の `resonite-model-preproduction` を使います。制作を開始せず、[Build Handoff テンプレート](skills/codex/resonite-model-preproduction/references/build-handoff.md)で `resonite-build` へ渡します。Meshyはベース生成の候補であり、実行には非同梱の `meshy-resoloop` と課金・画像送信の別途明示許可が必要です。
+制作前の仕様・受入条件・経路選定には同梱の `resonite-model-preproduction` を使います。制作を開始せず、[Build Handoff テンプレート](skills/codex/resonite-model-preproduction/references/build-handoff.md)で `resonite-build` へ渡します。Meshyはベース生成の候補であり、実行は同梱の [meshy-resoloop](skills/codex/meshy-resoloop/SKILL.md) を使い、課金・画像送信の別途明示許可が必要です。Linux/WSL2 の任意依存、無認証 doctor、環境変数だけのキー、送信不明時の再送禁止と Windows への bundle 一式の引き継ぎは [runbook](skills/codex/meshy-resoloop/references/runbook.md) を参照してください。init/sync は依存導入・認証・API 呼び出しを行いません。ベース生成後の仕上げは resonite-blender、適用と実機検証は resonite-build の責務です。
 
 `resoloop blender find`、`blender run SCRIPT.py`、`blender export FILE.blend`で、背景Pythonによるモデル制作からResoniteへのimportまで進められます。BlenderはPATH登録なしでも検出でき、事前に起動しておく必要はありません。同梱の`resonite-blender`スキルは造形、VR向け資源設計、静的meshのUV・法線・texture・materialのimportを扱います。未インストールの場合はユーザーの許可を確認し、CLIが勝手にインストールすることはありません。
 

@@ -33,7 +33,7 @@
           Exclude="../../src/**/bin/**/*;../../src/**/obj/**/*;../../src/**/__pycache__/**/*"
           Pack="true"
           PackagePath="source/src/" />
-    <None Include="../../skills/codex/**/*" Pack="true" PackagePath="source/skills/codex/" />
+    <None Include="../../skills/codex/**/*" Exclude="../../skills/codex/**/__pycache__/**/*;../../skills/codex/**/*.pyc" Pack="true" PackagePath="source/skills/codex/" />
     <None Include="../../Directory.Build.props;../../Directory.Packages.props;../../global.json;../../NuGet.Config;../../ResoLoop.slnx"
           Pack="true"
           PackagePath="source/" />

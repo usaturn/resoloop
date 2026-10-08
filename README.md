@@ -84,7 +84,17 @@ Create a teleporter gun in Resonite. Make it an equippable item shaped like a gu
 
 ## Model preproduction
 
-For concept exploration, a model brief or production-route planning, the bundled [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) skill defines specifications, acceptance criteria and a Build Handoff before modeling. It compares native, Blender, Meshy-assisted, hybrid and existing-asset routes, then hands off to `resonite-build` without executing production. Meshy execution requires the separate, non-bundled `meshy-resoloop` skill and explicit paid-operation/image-transmission permission. `init` installs the skill and its handoff template; existing projects can review `skills sync --check` before `--update`.
+For concept exploration, a model brief or production-route planning, the bundled [resonite-model-preproduction](skills/codex/resonite-model-preproduction/SKILL.md) skill defines specifications, acceptance criteria and a Build Handoff before modeling. It compares native, Blender, Meshy-assisted, hybrid and existing-asset routes, then hands off to `resonite-build` without executing production. Meshy execution uses the bundled [meshy-resoloop](skills/codex/meshy-resoloop/SKILL.md) workflow and requires separate explicit paid-operation/image-transmission permission. `init` installs the skill and its handoff template; existing projects can review `skills sync --check` before `--update`.
+
+## Optional Meshy workflow
+
+`init` and reviewed `skills sync --update` deploy the workflow plus adjacent scripts under `.agents/skills/meshy-resoloop/`; they do not install dependencies, request keys or call APIs. The wrapper supports **Linux/WSL2 Linux only**; Windows native can still init/sync and validate/diff/apply a complete bundle. Python >=3.12 and uv run the wrapper; offline `plan` needs no Node/Meshy/key. API work requires `meshy-cli@0.4.0` and Node >=22.12.0 (Node 24 recommended); offline conversion needs Blender's bpy/NumPy and the ResoLoop exporter. Keys are environment-only. The read-only `doctor` checks local dependencies, never calls an API, and does not fail for an absent key.
+
+```bash
+uv run --no-project "$WORLD/.agents/skills/meshy-resoloop/scripts/meshy.py" --project "$WORLD" doctor
+```
+
+See the [standalone setup, recovery and Windows handoff runbook](skills/codex/meshy-resoloop/references/runbook.md). Keep ResoLoop on the latest public NuGet version (including prereleases), not a fixed release. Base generation → Blender finishing → separately authorized build/apply remains the production boundary; offline success is not paid/live acceptance.
 
 ## Blender modeling
 
