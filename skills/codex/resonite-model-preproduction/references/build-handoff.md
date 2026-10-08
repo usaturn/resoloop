@@ -91,18 +91,20 @@ For each criterion specify target, comparison/measurement method, view/distance 
 - Meshy suitability: <base-generation role or exclusion; precision/mechanics/pivots/topology/UV constraints>
 - Blender cleanup: <geometry reconstruction, topology, dimensions, pivots, UV/material correction>
 - Native finishing: <geometry, colliders, Components, interaction and ProtoFlux responsibilities>
-- Exporter compatibility: <current supported scope to verify; rigs/animation/shape keys require explicit static adaptation + native runtime or an alternate route>
+- Exporter compatibility: <execution owner checks current resonite-blender scope for rigs/animation/shape keys, transparency/transmission/special shaders and GLB source adaptation; plan intentional manual Blender adaptation, static export + native runtime where appropriate, or an alternate route; no unsupported transfer promised>
 - Fallback: <trigger, alternate route, retained sources and impact on acceptance>
 
 ## 5. Paid-operation proposal and permissions
 
 Paid Operation Approval Status: not-authorized-at-preproduction-stage
 
-Handoff approval does not authorize spending or image transmission. An existing permission claim is context only; the execution owner must recheck the exact operation, inputs and scope. Do not include credentials. A non-Meshy route still retains the status above and marks the proposal non-applicable with a reason.
+Handoff approval does not authorize spending or image transmission. A shareable reference, usage license, possession or available key does not authorize external transmission to a particular destination. An existing permission claim is context only; the execution owner must recheck the exact operation, inputs and scope. Keep unknown budgets, settings, submission counts and permissions proposed or `unknown`; block only affected paid/transmission execution, not drafting this handoff. Do not include credentials. A non-Meshy route still retains the status above and marks the proposal non-applicable with a reason.
+
+- Meshy generation mode: <text-to-3D / image-to-3D; not-applicable — reason for a non-Meshy route>
 
 | Proposed operation | Generation scope / inputs sent / destination | Submission count | Budget ceiling / currency or credits | Model | Texture / PBR / resolution | Permission evidence to recheck |
 | --- | --- | --- | --- | --- | --- | --- |
-| <operation; preview/refine separately> | <exact text/images/asset references; no secret contents> | <count per operation, total> | <ceiling, not inferred> | <proposed model> | <settings> | <not granted here; prior claim if supplied> |
+| <operation; preview and refine counted as separate submissions> | <exact text/images/asset references; no secret contents> | <count per operation, total> | <ceiling, not inferred> | <proposed model> | <settings> | <not granted here; prior claim if supplied> |
 
 - Image-transmission Approval Status: <not authorized here; constraints/prior evidence to recheck>
 - Regeneration proposal: <additional paid operation; consider local refinement first>

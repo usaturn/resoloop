@@ -9,7 +9,9 @@ description: "Use when a Resonite 3D asset needs concept exploration, a model br
 
 Produce a Build Handoff, then stop. Do not start Meshy API calls (including status, download, retry or recovery), conversion, Blender operations, world changes, apply, ProtoFlux implementation or capture. Do not request, display or store credentials.
 
-A paid-operation proposal is not permission. Handoff approval and paid-operation/image-transmission approval are separate. Always record `Paid Operation Approval Status: not-authorized-at-preproduction-stage`; even previously supplied permission must be rechecked by the execution owner against the exact operation and inputs. Never infer privacy, transmission or spending permission.
+A paid-operation proposal is not permission. Handoff approval and paid-operation/image-transmission approval are separate. A shareable reference, usage license or possession does not authorize transmission to a particular external destination; key availability is not permission either. Always record `Paid Operation Approval Status: not-authorized-at-preproduction-stage`; even previously supplied permission must be rechecked by the execution owner against the exact operation and inputs. Never infer privacy, transmission or spending permission.
+
+Keep unknown budgets, settings, submission counts and permissions proposed or `unknown` in the handoff. They block only the affected paid/transmission execution, not drafting the handoff.
 
 Do not apply unit tests/TDD to a 3D asset, its appearance or one-off modeling scripts. Use visual, dimensional, structural, material and runtime reviews. Reusable importers, exporters, add-ons, pipelines and libraries remain software and follow normal testing policy.
 
@@ -39,7 +41,7 @@ Choose only after specification and acceptance:
 | Hybrid | Authored/generated forms plus native geometry, colliders, Components or behavior. Identify each boundary. |
 | Existing asset adaptation | Suitable source exists; verify usage rights, provenance, source format and suitability before planning changes. |
 
-Record reasons, rejected alternatives, input rights/formats, transmission constraints, Meshy suitability, Blender cleanup, native finishing and fallback. Meshy is base generation only, not precision mechanics or runtime behavior. Prefer Blender for precision and moving parts. External-transmission prohibition excludes sending those inputs to Meshy. Check the current exporter scope for rigs, animation and shape keys; plan static export plus native runtime behavior or an explicit alternate route, never promise unsupported transfer.
+Record reasons, rejected alternatives, input rights/formats, transmission constraints, Meshy suitability, Blender cleanup, native finishing and fallback. Meshy is base generation only, not precision mechanics or runtime behavior. Prefer Blender for precision and moving parts. External-transmission prohibition excludes sending those inputs to Meshy. The execution owner must check the current `resonite-blender` exporter scope for rigs, animation, shape keys, transparency, transmission, special shaders and GLB source adaptation. Plan intentional manual Blender adaptation (static export plus native runtime behavior where appropriate) or an explicit alternate route; never promise unsupported transfer.
 
 ### 5. Model Architecture
 
@@ -47,7 +49,7 @@ Design one mesh per object, with separate objects for independently moving parts
 
 ### 6. Production Planning
 
-Plan outcomes and exit checks for Phase 0 inputs/route, 1 blockout/base, 2 silhouette/proportion/candidate review, 3 primary forms/cleanup, 4 secondary detail, 5 materials/textures, 6 integration, 7 visual validation and 8 targeted refinement. Blockout first; review generated candidates against acceptance before committing to cleanup or detail. Reject unsuitable bases rather than hiding defects with textures.
+Plan outcomes and exit checks for Phase 0 inputs/route, 1 blockout/base, 2 silhouette/proportion/candidate review, 3 primary forms/cleanup, 4 secondary detail, 5 materials/textures, 6 integration, 7 visual validation and 8 targeted refinement. For Meshy, explicitly select text-to-3D or image-to-3D; count preview and refine as separate operations/submissions. Blockout first; review generated candidates against acceptance before committing to cleanup or detail. Reject unsuitable bases rather than hiding defects with textures.
 
 Use four review gates: **silhouette/proportion** after Phase 2; **geometry/structure** after Phases 3–4; **materials** after Phase 5; **integrated visual/runtime acceptance** after Phases 6–8. Specify views, measurements and evidence at each gate. Actual Resonite capture, dimension/structure inspection, material review and runtime checks belong to the later build; mark them unmeasured/pending here.
 
