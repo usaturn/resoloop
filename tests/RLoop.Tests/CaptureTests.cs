@@ -171,5 +171,15 @@ public sealed class CaptureTests : IDisposable
         Assert.Equal(active, result);
     }
 
+    [Fact]
+    public void ScreenshotDirectoryFailsFastWhenPicturesFolderIsUnavailable()
+    {
+        // Breaks caught: on Linux without ~/Pictures the resolver returned the relative path "Resonite", so capture
+        // watched <cwd>/Resonite until CAPTURE_EXPORT_TIMEOUT while Resonite saved photos elsewhere (usaturn/resoloop#13).
+        var error = Assert.Throws<RLoopException>(() => ScreenshotDirectoryResolver.ResolveDefault("", _root, _ => null));
+
+        Assert.Equal("CAPTURE_EXPORT_DIR_UNREACHABLE", error.Code);
+    }
+
     public void Dispose() => Directory.Delete(_root, true);
 }

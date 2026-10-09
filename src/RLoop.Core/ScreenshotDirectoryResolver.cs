@@ -15,8 +15,15 @@ public static class ScreenshotDirectoryResolver
         picturesDirectory ??= Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
         userProfile ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-        var primary = Path.GetFullPath(Path.Combine(picturesDirectory, PlatformDirectory));
-        var candidates = new HashSet<string>(PathComparer) { primary };
+        var candidates = new HashSet<string>(PathComparer);
+        // GetFolderPath returns "" when the known folder is missing (Linux without ~/Pictures). Combining it would
+        // yield the relative path "Resonite" under the working directory, which Resonite never writes to.
+        string? primary = null;
+        if (!string.IsNullOrWhiteSpace(picturesDirectory))
+        {
+            primary = Path.GetFullPath(Path.Combine(picturesDirectory, PlatformDirectory));
+            candidates.Add(primary);
+        }
 
         if (OperatingSystem.IsWindows())
         {
@@ -42,8 +49,27 @@ public static class ScreenshotDirectoryResolver
             .Where(candidate => candidate.Latest is not null)
             .OrderByDescending(candidate => candidate.Latest)
             .FirstOrDefault();
-        return active.Path ?? primary;
+        return active.Path ?? primary ?? throw Unreachable(picturesDirectory, candidates);
     }
+
+    // Shared with ScreenshotExport so every failure about the export folder gives the same next steps.
+    internal static readonly string[] ExportFolderSuggestions =
+    [
+        "Set --screenshots-dir, RESOLOOP_SCREENSHOTS_DIR or screenshotsDirectory to a folder this CLI can read.",
+        "If Resonite runs on another machine or outside this container (for example a Windows host with a Linux dev container), mount its Pictures/Resonite folder and point the setting at the mount."
+    ];
+
+    private static RLoopException Unreachable(string picturesDirectory, IEnumerable<string> candidates) => new(
+        "CAPTURE_EXPORT_DIR_UNREACHABLE",
+        "No screenshot export folder is readable from this CLI: the Pictures known folder is unavailable and no screenshot directory is configured.",
+        ExitCodes.ConfigurationError,
+        new Dictionary<string, object?>
+        {
+            ["picturesFolder"] = picturesDirectory,
+            ["candidates"] = candidates.Select(path => new ScreenshotDirectoryCandidate(path, Directory.Exists(path))).ToArray(),
+            ["oneDriveCandidatesChecked"] = OperatingSystem.IsWindows()
+        },
+        ExportFolderSuggestions);
 
     private static void AddOneDriveCandidates(HashSet<string> candidates, string? root)
     {
@@ -81,3 +107,6 @@ public static class ScreenshotDirectoryResolver
         ? StringComparer.OrdinalIgnoreCase
         : StringComparer.Ordinal;
 }
+
+/// <summary>A screenshot folder the default resolver considered, reported when none is usable.</summary>
+public sealed record ScreenshotDirectoryCandidate(string Path, bool Exists);
