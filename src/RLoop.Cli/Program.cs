@@ -205,6 +205,7 @@ public static class Program
                     if (!captureUri.IsLoopback && resolution.Config.ScreenshotsDirectory is null)
                         throw new RLoopException("CAPTURE_DIRECTORY_REQUIRED", "Remote Resonite requires --screenshots-dir pointing to its locally accessible screenshot export folder.", ExitCodes.InvalidArguments);
                     var screenshots = resolution.Config.ScreenshotsDirectory ?? ScreenshotDirectoryResolver.ResolveDefault();
+                    var screenshotsSource = resolution.Sources.GetValueOrDefault("screenshotsDirectory") ?? "default";
                     await using var captureClient = new ResoniteLinkClientAdapter(TimeSpan.FromSeconds(resolution.Config.TimeoutSeconds), ReflectionCacheFrom(parsed));
                     await captureClient.ConnectAsync(captureUri, TimeSpan.FromSeconds(resolution.Config.TimeoutSeconds), commandToken);
                     CanvasFrame? framing = null;
@@ -217,7 +218,7 @@ public static class Program
                         document = document with { Cameras = new Dictionary<string, ApplyCameraSpec> { [camera] = framing.Camera } };
                     }
                     result = await new LiveCaptureService(captureClient).CaptureAsync(document, camera, captureOutput,
-                        screenshots, width, height, parsed.IntOption("capture-timeout", 60, 1, 600), commandToken);
+                        screenshots, width, height, parsed.IntOption("capture-timeout", 60, 1, 600), commandToken, screenshotsSource);
                     result = result with { Framing = framing };
                 }
                 output.Success(result, writer => writer.WriteLine($"captured {result.Format} {result.Width}x{result.Height} -> {result.Output}"));

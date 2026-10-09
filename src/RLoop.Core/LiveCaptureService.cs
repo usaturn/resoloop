@@ -11,7 +11,7 @@ public sealed class LiveCaptureService(IResoniteClient client)
 
     public async Task<CaptureArtifact> CaptureAsync(ApplyDocument document, string cameraName, string output,
         string screenshotDirectory, int? width = null, int? height = null, int waitSeconds = 60,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string screenshotDirectorySource = "default")
     {
         if (document.Cameras is null || !document.Cameras.TryGetValue(cameraName, out var camera))
             throw new RLoopException("CAPTURE_CAMERA_NOT_FOUND", $"Camera bookmark '{cameraName}' is not declared.", ExitCodes.ValidationFailed);
@@ -28,7 +28,7 @@ public sealed class LiveCaptureService(IResoniteClient client)
             throw new RLoopException("CAPTURE_FORMAT_UNSUPPORTED", "Live capture requires .png or .jpg output; use .svg for offline projection.", ExitCodes.ValidationFailed);
         var directory = Path.GetFullPath(screenshotDirectory);
         var summary = await SceneArtifactService.SummarizeAsync(document, cancellationToken);
-        using var export = new ScreenshotExport(directory);
+        using var export = new ScreenshotExport(directory, screenshotDirectorySource);
 
         var definition = await client.DescribeComponentTypeAsync(CameraType, cancellationToken);
         if (definition.Methods?.Any(m => m.Name == "Capture" && !m.IsStatic && m.Parameters.Count == 0) != true)

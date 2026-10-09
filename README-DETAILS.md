@@ -368,6 +368,8 @@ resoloop capture content/main.json --camera main --output artifacts/main.png --s
 
 OneDriveなどで保存先が異なる環境は、環境変数 `RESOLOOP_SCREENSHOTS_DIR` または `.resoloop.json` / `%USERPROFILE%\.resoloop\config.json` の `screenshotsDirectory` に保存先を設定できます。優先順位はCLI → 環境変数 → project設定 → user設定です。[examples/capture.json](examples/capture.json)は原点付近を撮る最小例です。
 
+Resoniteを別のPCやコンテナの外（例: WindowsのResoniteとLinuxのDev Container）で動かす場合、CLIはその写真フォルダを直接読めません。写真フォルダをCLIから読める場所にマウントし、`--screenshots-dir`・`RESOLOOP_SCREENSHOTS_DIR`・`screenshotsDirectory` のどれかでマウント先を指定してください。指定が無く、Pictures既知フォルダも取得できない環境（`~/Pictures` が無いLinuxなど）では、接続や撮影の前に `CAPTURE_EXPORT_DIR_UNREACHABLE`（exit 3）で停止し、調べた候補を `context` に返します。`CAPTURE_EXPORT_TIMEOUT` の `context` には、監視したフォルダ（`directory`）、その指定元（`directorySource`）、撮影前のフォルダの有無と画像の数が入ります。
+
 同じ写真フォルダを使うresoloopの同時撮影は拒否します。撮影中は他のカメラや手動の写真撮影を避けてください。公開APIには撮影要求と保存ファイルを対応付けるIDがないため、撮影前後の新規ファイル差分で検出し、複数候補があれば `CAPTURE_AMBIGUOUS` を返します。画像が届かない場合は `CAPTURE_EXPORT_TIMEOUT`（exit 8）となります。対象ワールドが表示中か、レンダラーが動作しているか、保存先が正しいか確認してください。`--capture-timeout` は書き出し待ち時間、`--command-timeout` は接続・準備を含めた全体の上限です。
 
 成功時は `screenshotAvailable: true`、`format: jpeg` または `png` を返します。併記する `.scene.json` はmanifest上の要約です。オフラインの比較には従来の `--output capture.svg` を使えます。

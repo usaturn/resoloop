@@ -9,14 +9,18 @@ namespace RLoop.Core;
 public sealed class ScreenshotExport : IDisposable
 {
     private readonly string _directory;
+    private readonly string _directorySource;
     private readonly FileStream _lease;
     private HashSet<string>? _before;
+    private bool _existedBeforeCapture;
 
-    public ScreenshotExport(string directory)
+    public ScreenshotExport(string directory, string directorySource = "default")
     {
         _directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        _directorySource = directorySource;
         if (!Directory.Exists(_directory) && !Directory.Exists(Path.GetDirectoryName(_directory)))
-            throw new RLoopException("CAPTURE_DIRECTORY_NOT_FOUND", $"Screenshot directory parent does not exist: {_directory}", ExitCodes.ValidationFailed);
+            throw new RLoopException("CAPTURE_DIRECTORY_NOT_FOUND", $"Screenshot directory parent does not exist: {_directory}", ExitCodes.ValidationFailed,
+                new Dictionary<string, object?> { ["directory"] = _directory, ["directorySource"] = directorySource });
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             OperatingSystem.IsWindows() ? _directory.ToUpperInvariant() : _directory)));
         try
@@ -35,7 +39,11 @@ public sealed class ScreenshotExport : IDisposable
             .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
         : new HashSet<string>();
 
-    public void Arm() => _before = Files();
+    public void Arm()
+    {
+        _existedBeforeCapture = Directory.Exists(_directory);
+        _before = Files();
+    }
 
     public async Task WaitAndCopyAsync(string output, int width, int height, TimeSpan timeout, CancellationToken ct = default)
     {
@@ -97,7 +105,16 @@ public sealed class ScreenshotExport : IDisposable
             }
             await Task.Delay(100, ct);
         }
-        throw new RLoopException("CAPTURE_EXPORT_TIMEOUT", $"No complete screenshot arrived in '{_directory}' within {timeout.TotalSeconds:0.#} seconds. Check --screenshots-dir, local Resonite export settings and renderer availability.", ExitCodes.Timeout);
+        throw new RLoopException("CAPTURE_EXPORT_TIMEOUT", $"No complete screenshot arrived in '{_directory}' within {timeout.TotalSeconds:0.#} seconds. Check --screenshots-dir, local Resonite export settings and renderer availability.", ExitCodes.Timeout,
+            new Dictionary<string, object?>
+            {
+                ["directory"] = _directory,
+                ["directorySource"] = _directorySource,
+                ["directoryExistedBeforeCapture"] = _existedBeforeCapture,
+                ["imagesBeforeCapture"] = _before.Count,
+                ["waitSeconds"] = timeout.TotalSeconds
+            },
+            ["Check that the target world is focused and the renderer is running.", .. ScreenshotDirectoryResolver.ExportFolderSuggestions]);
     }
 
     public static (int Width, int Height, string Format)? ImageDimensions(ReadOnlySpan<byte> data)
