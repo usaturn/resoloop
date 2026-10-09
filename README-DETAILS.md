@@ -81,8 +81,8 @@ resoloop status --json
 
 設定優先順位:
 
-1. CLI: --url, --timeout, --command-timeout, --library-path
-2. 環境変数: RESONITE_LINK_URL, RESOLOOP_TIMEOUT_SECONDS, RESOLOOP_COMMAND_TIMEOUT_SECONDS, RESOLOOP_FLUX_EXECUTABLE, RESONITE_MANAGED_DATA_PATH
+1. CLI: --url, --timeout, --command-timeout, --library-path, --host-path-map
+2. 環境変数: RESONITE_LINK_URL, RESOLOOP_TIMEOUT_SECONDS, RESOLOOP_COMMAND_TIMEOUT_SECONDS, RESOLOOP_FLUX_EXECUTABLE, RESONITE_MANAGED_DATA_PATH, RESOLOOP_HOST_PATH_MAP
 3. カレントディレクトリから親方向で最初の .resoloop.json
 4. %USERPROFILE%\.resoloop\config.json
 
@@ -224,6 +224,14 @@ resoloop apply content/prop-v1/model.apply.json --state .resoloop/state/prop.jso
 `modeling/model.py`は自分のprojectの制作script、`VERIFIED_PARENT`は現在のworldで確認した親Slotに置き換えます。`--preserve-hierarchy`は部品の階層とpivotを保持し、`--pack-pbr`は対応する直接接続のPBR data画像をResonite向けにまとめます。検出pathの上書き、texture packing、対応shader、テスト手順と制約は[Blender workflow](docs/BLENDER.md)を参照してください。
 
 UVを持つn-gonと、生成・編集された画像bufferの現在のpixelに対応しています。Blender 5でも接線計算後にUV座標とrender-activeを先頭にしたチャンネル順を保持します。未修正版でUVが破損したbundleは自動修復されないため、元の`.blend`から新しい出力ディレクトリへ再exportしてください。textureのcolor profileは`resoloop type describe FrooxEngine.StaticTexture2D --member PreferredProfile --json`で実行環境のenumを確認します。item auditが返す外部参照候補と未使用allow指定も確認してください。[制作テストの改善と検証](docs/BLENDER-FEEDBACK.md)に記録があります。
+
+ResoniteはtextureとaudioのファイルをResonite側のパスとして開きます（meshはCLIが内容を送るため影響しません）。WindowsのResoniteにLinuxのコンテナ（Dev Container、WSL2上のDockerなど）からapplyすると、コンテナ内の `/workspaces/...` をResoniteが開けません。`--host-path-map FROM=TO`、環境変数 `RESOLOOP_HOST_PATH_MAP`、`.resoloop.json` の `hostPathMap` のどれかで、CLIのパスの先頭 `FROM` をResoniteが読めるパス `TO` に置き換えて渡せます。hashはCLI側のパスで計算し、stateには置き換え後のパスを保存しません。WSLの `/home/USER/repo` をコンテナの `/workspaces/repo` にmountしている場合の例です（JSONでは `\` を `\\` と書きます）。
+
+~~~json
+{ "hostPathMap": "/workspaces/repo=\\\\wsl.localhost\\DISTRO\\home\\USER\\repo" }
+~~~
+
+この設定が無く、`/` から始まるパスをtexture・audioのimportでResoniteへ渡す場合、plan/diffは `ASSET_HOST_PATH_UNMAPPED` を警告します（Resoniteがこのホストで直接動いている場合は無視できます）。Resoniteがパスを開けないと `ASSET_HOST_PATH_UNREACHABLE`（exit 3）で止まり、`context` にCLIのパス（`source`）、Resoniteへ渡したパス（`hostPath`）、Resoniteのエラー（`resoniteError`）が入ります。Resoniteは開けないパスの報告に約50秒かかるため、既定の要求タイムアウト（30秒）では `REQUEST_TIMEOUT` になります。その場合も `context` の `asset` と `hostPath` で待っていたassetを確認でき、`--timeout 90` で再実行するとResoniteのエラーを受け取れます。
 
 新しいexportはproviderを名前付きSlotへ分け、中断したapplyからの復旧に備えます。既存のroot直下provider配置を保つには`--legacy-root-providers`を使用できます。strict validation、nested SyncObjectの差分、Slot fieldの観測、geometry／partial／pivotのbounds区別は後述の観測・検証手順に従います。[時計塔・戦車テストの改善](docs/CLOCKTOWER-FEEDBACK.md)も参照してください。
 
