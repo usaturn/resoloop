@@ -7,7 +7,8 @@ using System.Text.Json.Nodes;
 
 namespace RLoop.Core;
 
-public sealed partial class WorldService(IResoniteClient client, string? generatedContentSource = null)
+public sealed partial class WorldService(IResoniteClient client, string? generatedContentSource = null,
+    HostPathMap? hostPathMap = null)
 {
     public async Task<string> ResolveSlotIdAsync(string selector, CancellationToken cancellationToken = default)
     {
@@ -397,7 +398,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             prepared.Entries.Count(x => x.Action == "rename"),
             prepared.Entries.Count(x => x.Action == "delete"), false,
             $"Non-atomic preview. State checkpoint: {prepared.StatePath}. Re-run apply to converge; pruning stale targets requires --prune --yes. Replacements for recreate/relocate delete their old Components as part of the lifecycle without --prune.")
-            { Warnings = ComponentIdentityDiagnostics.Analyze(document) };
+            { Warnings = [.. ComponentIdentityDiagnostics.Analyze(document), .. UnmappedHostPathWarnings(prepared)] };
     }
 
     public async Task<ApplyResult> ApplyAsync(ApplyDocument document, ApplyOptions? options = null,
@@ -424,7 +425,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 asset.Url = asset.DirectUrl ?? (asset.Action == "no-op" && prepared.State.Assets.TryGetValue(asset.Key, out var saved)
-                    ? asset.MigratedUrl ?? saved.Url : await client.ImportAssetAsync(asset.Spec, asset.ResolvedSource, cancellationToken));
+                    ? asset.MigratedUrl ?? saved.Url : await ImportAssetAsync(asset, cancellationToken));
                 if (asset.Action == "create")
                 {
                     counts.AssetsImported++;
@@ -1035,7 +1036,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         var rootSpec = new ApplyNodeSpec(document.Slot, document.Components, document.Children);
         BuildNode(prepared, rootSpec, null, parent, parentPath, true);
         await PrepareRelocationTransformsAsync(prepared, parentPath, cancellationToken);
-        BuildAssetPlans(prepared);
+        BuildAssetPlans(prepared, hostPathMap);
         ThrowIfRecreateInterruptedAcrossSessions(prepared);
         var unverified = prepared.State.Components.Where(pair => pair.Value.ComponentIndex == -1).ToArray();
         if (!prepared.SameSession && unverified.Length > 0)
@@ -1262,7 +1263,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             "ResoniteLink 0.13.1 applies the list atomically as one member; the preview exposes element additions/removals.");
     }
 
-    private static void BuildAssetPlans(PreparedApply prepared)
+    private static void BuildAssetPlans(PreparedApply prepared, HostPathMap? hostPathMap)
     {
         foreach (var pair in prepared.Document.Assets ?? new Dictionary<string, ApplyAssetSpec>())
         {
@@ -1287,13 +1288,76 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
             }
             var unchanged = direct is not null || prepared.State.Assets.TryGetValue(pair.Key, out var state) &&
                 state.SourceHash == hash && state.Kind.Equals(pair.Value.Kind, StringComparison.OrdinalIgnoreCase);
-            var runtime = new AssetRuntime(pair.Key, pair.Value, resolved, hash, direct, unchanged ? "no-op" : "create");
+            var hostSource = direct is null && HostPathMap.AppliesTo(pair.Value.Kind) ? hostPathMap?.Map(resolved) ?? resolved : null;
+            var runtime = new AssetRuntime(pair.Key, pair.Value, resolved, hash, direct, unchanged ? "no-op" : "create")
+                { HostSource = hostSource };
             prepared.Assets.Add(runtime);
             prepared.Entries.Insert(0, new ApplyPlanEntry(runtime.Action, "asset", "$assets/" + pair.Key, pair.Key, pair.Value.Kind,
                 Reason: direct is not null ? "asset URI is already addressable" : unchanged ?
                     "source hash and imported URL match state" : "source is new or changed and must be imported"));
         }
     }
+
+    // A Windows Resonite resolves a POSIX path against C:\ and reports the failure only after about 50 seconds.
+    private IReadOnlyList<ApplyValidationIssue> UnmappedHostPathWarnings(PreparedApply prepared)
+    {
+        var unmapped = prepared.Assets.Where(asset => asset.Action == "create" && asset.HostSource is not null &&
+            asset.HostSource.StartsWith('/') && hostPathMap?.Covers(asset.ResolvedSource) != true).ToArray();
+        return unmapped.Length == 0 ? [] :
+        [
+            new ApplyValidationIssue("ASSET_HOST_PATH_UNMAPPED",
+                $"{unmapped.Length} texture/audio import(s) pass a POSIX path such as '{unmapped[0].HostSource}' to Resonite, which a Windows Resonite cannot open. Set hostPathMap (--host-path-map FROM=TO) unless Resonite runs natively on this host.",
+                "$assets", "warning")
+        ];
+    }
+
+    private async Task<string> ImportAssetAsync(AssetRuntime asset, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await client.ImportAssetAsync(asset.Spec, asset.HostSource ?? asset.ResolvedSource, cancellationToken);
+        }
+        catch (RLoopException ex)
+        {
+            var context = new Dictionary<string, object?>(ex.Context, StringComparer.Ordinal)
+            {
+                ["asset"] = asset.Key,
+                ["kind"] = asset.Spec.Kind,
+                ["source"] = asset.ResolvedSource
+            };
+            if (asset.HostSource is null) throw new RLoopException(ex.Code, ex.Message, ex.ExitCode, context, ex.Suggestions, ex);
+            context["hostPath"] = asset.HostSource;
+            context["hostPathMap"] = hostPathMap?.ToString();
+            // plan checked that the source exists here, so a missing path means the Resonite host cannot see it.
+            if (ex.Code == "ASSET_IMPORT_FAILED" && (ex.Message.Contains("DirectoryNotFoundException", StringComparison.Ordinal) ||
+                                                     ex.Message.Contains("FileNotFoundException", StringComparison.Ordinal)))
+            {
+                context["resoniteError"] = ex.Message;
+                throw new RLoopException("ASSET_HOST_PATH_UNREACHABLE",
+                    $"Resonite could not open '{asset.HostSource}' for asset '{asset.Key}'. Resonite reads texture and audio files on its own host.",
+                    ExitCodes.ConfigurationError, context, HostPathSuggestions(), ex);
+            }
+            if (ex.Code == "REQUEST_TIMEOUT")
+                throw new RLoopException(ex.Code, ex.Message, ex.ExitCode, context,
+                [
+                    "Resonite can take about 50 seconds to report a path it cannot open, longer than the default request timeout; retry once with --timeout 90 to receive its error.",
+                    .. HostPathSuggestions(), .. ex.Suggestions
+                ], ex);
+            throw new RLoopException(ex.Code, ex.Message, ex.ExitCode, context, ex.Suggestions, ex);
+        }
+    }
+
+    private string[] HostPathSuggestions() => hostPathMap is null
+        ?
+        [
+            @"If Resonite cannot read hostPath, set hostPathMap FROM=TO (--host-path-map, RESOLOOP_HOST_PATH_MAP or .resoloop.json) so the CLI prefix FROM becomes a path the Resonite host can read, for example /workspaces/repo=\\wsl.localhost\<distro>\home\<user>\repo.",
+            "Or run apply on the Resonite host."
+        ]
+        :
+        [
+            $"Check that hostPathMap '{hostPathMap}' covers the source and that its target is readable on the Resonite host.",
+            "Or run apply on the Resonite host."
+        ];
 
     private static Dictionary<string, string> PlanAssetUrls(PreparedApply prepared) =>
         prepared.Assets.Where(x => x.DirectUrl is not null || prepared.State.Assets.ContainsKey(x.Key))
@@ -2736,5 +2800,7 @@ public sealed partial class WorldService(IResoniteClient client, string? generat
         public string Action { get; } = action;
         public string? Url { get; set; }
         public string? MigratedUrl { get; set; }
+        // The path handed to Resonite for kinds it opens itself; null when the CLI reads the source.
+        public string? HostSource { get; init; }
     }
 }

@@ -100,7 +100,7 @@ Slot / Componentの明示keyを変更する場合は、新key側へ`migrateFrom`
 
 local `texture`、`audio`、ResoniteLink `ImportMeshJSON`は公開import APIを使います。source hashと返されたURLをownership stateへcheckpointし、内容が変わった場合だけ再importします。`resdb:`などのabsolute URIはそのまま参照できます。materialはworld内Componentとして宣言するか、既存asset URIを使います。
 
-Blenderからは `resoloop blender export FILE.blend --output NEW_DIRECTORY --name NAME --parent VERIFIED_PARENT` でmesh・画像・material接続を含むapply bundleを生成できます。均一な静的mesh JSONはアダプターで公式binary APIへ変換して送信し、UV channelを保持します。画像パスはResoniteホストから読める必要があります。[Blender制作](BLENDER.md)を参照してください。
+Blenderからは `resoloop blender export FILE.blend --output NEW_DIRECTORY --name NAME --parent VERIFIED_PARENT` でmesh・画像・material接続を含むapply bundleを生成できます。均一な静的mesh JSONはアダプターで公式binary APIへ変換して送信し、UV channelを保持します。画像パスはResoniteホストから読める必要があります。別ホストやコンテナでは `hostPathMap` でResoniteが読めるパスへ置き換えられます。[Blender制作](BLENDER.md)を参照してください。
 
 ## Camera、scene artifact、test
 
