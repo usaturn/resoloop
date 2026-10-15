@@ -87,7 +87,7 @@ public static partial class PluginInstaller
         var directory = new DirectoryInfo(path);
         foreach (var entry in directory.EnumerateFileSystemInfos("*", PluginFiles.Shallow))
         {
-            if (entry.LinkTarget is not null || entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            if (entry.LinkTarget is not null)
             {
                 if (entry is DirectoryInfo && OperatingSystem.IsWindows()) Directory.Delete(entry.FullName);
                 else File.Delete(entry.FullName);

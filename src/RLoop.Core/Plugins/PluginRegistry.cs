@@ -284,7 +284,8 @@ internal static class PluginFiles
             {
                 var relative = prefix + entry.Name;
                 if (skip?.Invoke(relative) == true) continue;
-                if (entry.LinkTarget is not null || entry.Attributes.HasFlag(FileAttributes.ReparsePoint)) links.Add(relative);
+                // LinkTarget covers symlinks and junctions; other reparse points (for example OneDrive files) are regular content.
+                if (entry.LinkTarget is not null) links.Add(relative);
                 else if (entry is DirectoryInfo child) Walk(child, relative + "/");
                 else files.Add(relative);
             }
