@@ -179,6 +179,43 @@ public sealed class ProjectInitializerTests : IDisposable
         Assert.True(File.Exists(skillPath));
     }
 
+    // Catch sync deleting or rewriting files of a skill that an earlier build deployed
+    // but this build no longer bundles (meshy-resoloop): projects still load them.
+    [Fact]
+    public void SkillSyncKeepsFilesOfSkillsNoLongerBundled()
+    {
+        ProjectInitializer.Initialize(_root);
+        var previouslyBundled = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["meshy-resoloop/SKILL.md"] = "---\nname: meshy-resoloop\ndescription: previously bundled\n---\n",
+            ["meshy-resoloop/references/runbook.md"] = "# previously bundled runbook\n",
+            ["meshy-resoloop/scripts/meshy.py"] = "print('previously bundled')\n"
+        };
+        var lockPath = Path.Combine(_root, BundledSkillManager.LockRelativePath);
+        var locked = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(lockPath))!;
+        foreach (var (file, content) in previouslyBundled)
+        {
+            var path = Path.Combine(_root, ".agents", "skills", file);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, content);
+            locked["files"]![file] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(content)));
+        }
+        File.WriteAllText(lockPath, locked.ToJsonString());
+        var skillDirectory = Path.Combine(_root, ".agents", "skills", "meshy-resoloop");
+        var before = SnapshotFiles(skillDirectory);
+
+        Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
+        var updated = BundledSkillManager.Sync(_root, update: true);
+
+        Assert.Equal(BundledSkillManager.LockRelativePath, Assert.Single(updated.Updated));
+        Assert.Equal(before, SnapshotFiles(skillDirectory));
+        var rewritten = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(lockPath))!;
+        Assert.DoesNotContain(rewritten["files"]!.AsObject(),
+            pair => pair.Key.StartsWith("meshy-resoloop/", StringComparison.Ordinal));
+        Assert.True(BundledSkillManager.Sync(_root, update: false).Synchronized);
+    }
+
     [Fact]
     public void ReferenceFilesAreInstalledRestoredAndProtectedBeforeAnyUpdate()
     {
@@ -222,6 +259,12 @@ public sealed class ProjectInitializerTests : IDisposable
         Assert.NotNull(migrated["files"]!["resonite-uix/references/layout.md"]);
         Assert.Null(migrated["skills"]);
     }
+
+    private static (string Relative, string Hex, DateTime Modified)[] SnapshotFiles(string directory) =>
+        Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Order(StringComparer.Ordinal)
+            .Select(path => (Path.GetRelativePath(directory, path).Replace('\\', '/'),
+                Convert.ToHexString(File.ReadAllBytes(path)), File.GetLastWriteTimeUtc(path))).ToArray();
 
     public void Dispose()
     {
