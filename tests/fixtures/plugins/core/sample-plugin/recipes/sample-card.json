@@ -1,0 +1,5 @@
+{
+  "prototypes": {
+    "sample.card": { "slot": { "key": "${key}", "name": "${key}" } }
+  }
+}

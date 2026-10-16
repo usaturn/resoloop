@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using RLoop.Core;
+using RLoop.Core.Plugins;
 using RLoop.Flux;
 using RLoop.Flux.Deployer;
 using RLoop.ResoniteLink;
@@ -119,6 +120,9 @@ public static class Program
             commandCancellation.CancelAfter(TimeSpan.FromSeconds(resolution.Config.CommandTimeoutSeconds));
             var commandToken = commandCancellation.Token;
             if (parsed.Has("verbose")) Console.Error.WriteLine(JsonSerializer.Serialize(new { configSources = resolution.Sources }));
+
+            if (parsed.Positionals[0].Equals("plugin", StringComparison.OrdinalIgnoreCase))
+                return await RunPlugin(parsed, output, commandToken);
 
             if (parsed.Positionals[0].Equals("discover", StringComparison.OrdinalIgnoreCase))
             {
@@ -290,6 +294,51 @@ public static class Program
             output.Success(new { name, output = UixRecipes.Export(name, args.RequireOption("output")), prototype = UixRecipes.Describe(name).Prototype });
         }
         else throw UnknownCommand("uix recipe: use list, describe NAME, or export NAME --output NEW_FILE.json");
+    }
+
+    private static async Task<int> RunPlugin(ParsedArguments args, OutputWriter output, CancellationToken token)
+    {
+        var command = args.Positional(1, "plugin subcommand (install, list, remove)").ToLowerInvariant();
+        var expected = command switch { "install" or "remove" => 3, "list" => 2, _ => throw UnknownCommand("plugin " + command) };
+        if (args.Positionals.Count != expected)
+            throw new RLoopException("UNEXPECTED_ARGUMENT", "Use plugin install SOURCE [--ref REF], plugin list, or plugin remove NAME --yes.",
+                ExitCodes.InvalidArguments);
+        if (command == "remove") RequireYes(args, "plugin remove");
+        var registry = new PluginRegistry(PluginRegistry.FindProjectRoot(args.Option("project"), Environment.CurrentDirectory), ProductVersion());
+        if (command == "install")
+        {
+            var installed = await PluginInstaller.InstallAsync(registry, args.Positionals[2], args.Option("ref"), token);
+            output.Success(installed, writer =>
+                writer.WriteLine($"installed {installed.Name} {installed.Version} ({installed.FileCount} files) -> {installed.InstallDirectory}"));
+        }
+        else if (command == "remove")
+        {
+            var removed = PluginInstaller.Remove(registry, args.Positionals[2]);
+            output.Success(removed, writer =>
+            {
+                writer.WriteLine($"removed {removed.Name} ({removed.RemovedDirectory})");
+                writer.WriteLine($"  note: {removed.Note}");
+            });
+        }
+        else
+        {
+            var plugins = registry.List().Select(status => new
+            {
+                name = status.Name, version = status.Record?.Version, ok = status.Ok, source = status.Record?.Source,
+                commit = status.Record?.Commit, installedAt = status.Record?.InstalledAt, path = status.InstallDirectory, problem = status.Problem
+            }).ToArray();
+            output.Success(new { projectRoot = registry.ProjectRoot, pluginsDirectory = registry.PluginsDirectory, plugins }, writer =>
+            {
+                writer.WriteLine($"plugins in {registry.PluginsDirectory}: {plugins.Length}");
+                foreach (var plugin in plugins)
+                {
+                    var origin = plugin.source is null ? "" : $"{plugin.source.Kind} {plugin.source.Location}" +
+                        (plugin.source.Ref is null ? "" : $" @ {plugin.source.Ref}") + (plugin.commit is null ? "" : $" ({plugin.commit[..12]})");
+                    writer.WriteLine($"  {(plugin.ok ? "ok" : plugin.problem!.Code),-28} {plugin.name} {plugin.version} {origin}");
+                }
+            });
+        }
+        return ExitCodes.Success;
     }
 
     private static async Task<int> RunBlender(ParsedArguments args, OutputWriter output, RLoopConfig config, CancellationToken token)
@@ -1096,6 +1145,9 @@ Project setup:
   resoloop manifest scaffold --output NEW_FILE.json [--key panel] [--json]
   resoloop manifest scaffold --kind provider --key KEY --type REFLECTED_TYPE --output NEW_NODE.json [--json]
   resoloop skills sync [DIRECTORY] (--check | --update) [--json]
+  resoloop plugin install DIRECTORY|GIT_URL [--ref TAG|BRANCH|COMMIT] [--project DIR] [--json]
+  resoloop plugin list [--project DIR] [--json]
+  resoloop plugin remove NAME --yes [--project DIR] [--json]
   resoloop doctor [--url ws://localhost:PORT] [--json]
 
 Connection and observation:

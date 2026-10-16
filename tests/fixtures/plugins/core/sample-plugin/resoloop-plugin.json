@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "sample-plugin",
+  "version": "1.2.3",
+  "description": "Fixture plugin for resoloop plugin tests.",
+  "resoloop": { "minVersion": "0.1.0-preview.1", "maxVersionExclusive": "0.2.0" },
+  "commands": [
+    {
+      "name": "sample-hello",
+      "description": "Print a greeting.",
+      "program": "./scripts/hello.sh",
+      "args": ["--root", "${pluginRoot}", "--data=${pluginData}"],
+      "timeoutSeconds": 60
+    },
+    { "name": "sample-uv", "description": "Run the sample through uv.", "program": "uv", "args": ["run", "--project", "${pluginRoot}", "sample"] }
+  ],
+  "skills": [{ "name": "sample-skill", "path": "skills/sample-skill" }],
+  "recipes": [
+    {
+      "name": "sample-card",
+      "path": "recipes/sample-card.json",
+      "prototype": "sample.card",
+      "purpose": "Fixture card prototype.",
+      "parameters": { "key": "Unique stable key prefix." },
+      "ports": { "root": "$slot:<key>" },
+      "requirements": ["Caller owns visuals."]
+    }
+  ],
+  "tools": [{ "name": "uv", "executable": "uv", "versionArgs": ["--version"], "required": false, "hint": "Install uv." }]
+}
